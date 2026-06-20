@@ -1,0 +1,106 @@
+{
+  "entities": {
+    "CompanySettings": {
+      "title": "CompanySettings",
+      "description": "Configurações da empresa emissora de orçamentos",
+      "type": "object",
+      "properties": {
+        "nomeFantasia": { "type": "string" },
+        "razaoSocial": { "type": "string" },
+        "cnpj": { "type": "string" },
+        "endereco": { "type": "string" },
+        "cep": { "type": "string" },
+        "email": { "type": "string" },
+        "telefone": { "type": "string" },
+        "logo": { "type": "string" }
+      },
+      "required": ["nomeFantasia", "cnpj"]
+    },
+    "Cliente": {
+      "title": "Cliente",
+      "description": "Dados cadastrais do cliente",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "cpfCnpj": { "type": "string" },
+        "endereco": { "type": "string" },
+        "email": { "type": "string" },
+        "inscricaoEstadual": { "type": "string" },
+        "rg": { "type": "string" }
+      },
+      "required": ["id", "nome", "cpfCnpj"]
+    },
+    "Produto": {
+      "title": "Produto",
+      "description": "Informações de peças ou serviços",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "marca": { "type": "string" },
+        "modelo": { "type": "string" },
+        "condicao": { "type": "string", "enum": ["Novo", "Usado"] },
+        "ncm": { "type": "string" }
+      },
+      "required": ["id", "nome"]
+    },
+    "OrcamentoItem": {
+      "title": "OrcamentoItem",
+      "description": "Item incluso no orçamento",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "produtoId": { "type": "string" },
+        "nome": { "type": "string" },
+        "marca": { "type": "string" },
+        "modelo": { "type": "string" },
+        "condicao": { "type": "string" },
+        "ncm": { "type": "string" },
+        "quantidade": { "type": "number" },
+        "precoUnitario": { "type": "number" }
+      },
+      "required": ["id", "nome", "quantidade", "precoUnitario"]
+    },
+    "Orcamento": {
+      "title": "Orcamento",
+      "description": "Orçamento gerado",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "numero": { "type": "string" },
+        "clienteId": { "type": "string" },
+        "clienteNome": { "type": "string" },
+        "clienteDocumento": { "type": "string" },
+        "clienteEndereco": { "type": "string" },
+        "clienteEmail": { "type": "string" },
+        "items": { "type": "array" },
+        "tempoGarantia": { "type": "string" },
+        "tempoExecucao": { "type": "string" },
+        "condicoesPagamento": { "type": "string" },
+        "observacoes": { "type": "string" },
+        "dataCriacao": { "type": "string" },
+        "valorTotal": { "type": "number" }
+      },
+      "required": ["id", "numero", "clienteId", "clienteNome", "items", "valorTotal"]
+    }
+  },
+  "firestore": {
+    "/settings/company": {
+      "schema": "CompanySettings",
+      "description": "Configurações globais da empresa"
+    },
+    "/clientes/{clienteId}": {
+      "schema": "Cliente",
+      "description": "Lista de clientes cadastrados"
+    },
+    "/produtos/{produtoId}": {
+      "schema": "Produto",
+      "description": "Lista de produtos e serviços cadastrados"
+    },
+    "/orcamentos/{orcamentoId}": {
+      "schema": "Orcamento",
+      "description": "Lista de orçamentos/propostas gerados"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Gerador de Orçamentos",
+  "description": "Aplicativo mobile-first para geração e gerenciamento de orçamentos de serviços e vendas com emissão de PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
