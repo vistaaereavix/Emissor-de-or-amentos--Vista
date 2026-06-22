@@ -1,6 +1,7 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDDDk-FnqPmxxpwld6pvXSP_O1yUfm911o",
@@ -19,18 +20,5 @@ export const db = getFirestore(app, "ai-studio-a8a1c2da-08d2-4aef-b769-ada8e1601
 // Inicializa e exporta o Firebase Auth
 export const auth = getAuth(app);
 
-async function testConnection() {
-  try {
-    // Tenta obter um documento fictício do Firestore para validar a conectividade
-    await getDocFromServer(doc(db, 'settings', 'company'));
-    console.log("Firebase Firestore conectado com sucesso!");
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Firebase offline ou credenciais inválidas. Verifique a configuração.");
-    } else {
-      console.error("Erro ao conectar no Firebase:", error);
-    }
-  }
-}
-
-testConnection();
+// Inicializa e exporta o Firebase Storage
+export const storage = getStorage(app);

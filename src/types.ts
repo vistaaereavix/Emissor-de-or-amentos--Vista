@@ -3,10 +3,17 @@ export interface CompanySettings {
   razaoSocial: string;
   cnpj: string;
   endereco: string;
+  numero: string;
+  complemento: string;
   cep: string;
   email: string;
   telefone: string;
   logo: string; // Base64 data URL
+  certificadoDigital?: {
+    nomeArquivo: string;
+    url?: string;
+    dataUpload: string;
+  };
 }
 
 export interface Cliente {
@@ -17,6 +24,7 @@ export interface Cliente {
   email: string;
   inscricaoEstadual: string;
   rg: string;
+  telefone?: string;
 }
 
 export interface Produto {
@@ -24,9 +32,11 @@ export interface Produto {
   nome: string;
   marca: string;
   modelo: string;
-  condicao: 'Novo' | 'Seminovo' | 'Usado' | 'Recondicionado';
+  condicao: string;
   ncm: string;
   tipo?: 'Produto' | 'Servico';
+  valorCusto?: number;
+  valorFinal?: number;
 }
 
 export interface OrcamentoItem {
@@ -35,11 +45,13 @@ export interface OrcamentoItem {
   nome: string;
   marca: string;
   modelo: string;
-  condicao: 'Novo' | 'Seminovo' | 'Usado' | 'Recondicionado';
+  condicao: string;
   ncm: string;
   quantidade: number;
   precoUnitario: number;
   tipo?: 'Produto' | 'Servico';
+  valorCusto?: number;
+  valorFinal?: number;
 }
 
 export interface Orcamento {
@@ -50,6 +62,7 @@ export interface Orcamento {
   clienteDocumento: string;
   clienteEndereco: string;
   clienteEmail: string;
+  clienteTelefone?: string;
   items: OrcamentoItem[];
   tempoGarantia: string;
   tempoExecucao: string;

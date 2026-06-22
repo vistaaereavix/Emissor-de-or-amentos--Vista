@@ -7,7 +7,9 @@ export const INITIAL_COMPANY_SETTINGS: CompanySettings = {
   nomeFantasia: 'Vista Aérea Drones',
   razaoSocial: 'Vista Aérea Manutenção e Vendas de Drones Ltda',
   cnpj: '34.890.122/0001-45',
-  endereco: 'Av. das Nações Unidas, 12901 - Brooklin Paulista, São Paulo - SP',
+  endereco: 'Av. das Nações Unidas',
+  numero: '12901',
+  complemento: 'Andar 10',
   cep: '04578-910',
   email: 'diretoria@vistaaereadrones.com.br',
   telefone: '(11) 98765-4321',
@@ -43,7 +45,9 @@ export const INITIAL_PRODUCTS: Produto[] = [
     modelo: 'Mavic 3 Intelligent Flight Battery',
     condicao: 'Novo',
     ncm: '8507.60.00',
-    tipo: 'Produto'
+    tipo: 'Produto',
+    valorCusto: 950.00,
+    valorFinal: 1450.00
   },
   {
     id: 'p2',
@@ -52,7 +56,9 @@ export const INITIAL_PRODUCTS: Produto[] = [
     modelo: 'RC 2 (Com Tela)',
     condicao: 'Novo',
     ncm: '8806.92.00',
-    tipo: 'Produto'
+    tipo: 'Produto',
+    valorCusto: 5200.00,
+    valorFinal: 7800.00
   },
   {
     id: 'p3',
@@ -61,7 +67,9 @@ export const INITIAL_PRODUCTS: Produto[] = [
     modelo: 'M3P-ARM-B-L',
     condicao: 'Novo',
     ncm: '8807.30.00',
-    tipo: 'Servico'
+    tipo: 'Servico',
+    valorCusto: 120.00,
+    valorFinal: 450.00
   },
   {
     id: 'p4',
@@ -70,7 +78,9 @@ export const INITIAL_PRODUCTS: Produto[] = [
     modelo: 'P4P-GPS-BOARD',
     condicao: 'Usado',
     ncm: '8526.91.00',
-    tipo: 'Produto'
+    tipo: 'Produto',
+    valorCusto: 300.00,
+    valorFinal: 550.00
   },
   {
     id: 'p5',
@@ -79,7 +89,9 @@ export const INITIAL_PRODUCTS: Produto[] = [
     modelo: 'CALIB-ADV-01',
     condicao: 'Novo',
     ncm: '9901.12.00',
-    tipo: 'Servico'
+    tipo: 'Servico',
+    valorCusto: 50.00,
+    valorFinal: 350.00
   }
 ];
 

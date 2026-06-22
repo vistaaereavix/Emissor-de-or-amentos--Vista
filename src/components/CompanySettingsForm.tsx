@@ -1,7 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { CompanySettings } from '../types';
-import { Building, Mail, Phone, MapPin, FileText, Upload, Trash, Eye, CheckCircle, RefreshCw, Check } from 'lucide-react';
+import { Building, Mail, Phone, MapPin, FileText, Upload, Trash, Eye, CheckCircle, RefreshCw, Check, ShieldCheck } from 'lucide-react';
 import { motion } from 'motion/react';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { storage } from '../firebase';
 
 function formatCnpj(v: string) {
   const r = v.replace(/\D/g, '').slice(0, 14);
@@ -18,21 +20,116 @@ function formatCep(v: string) {
   return `${r.slice(0, 5)}-${r.slice(5)}`;
 }
 
+function formatTelefone(v: string) {
+  const r = v.replace(/\D/g, '').slice(0, 11);
+  if (r.length <= 2) return r;
+  if (r.length <= 7) return `(${r.slice(0, 2)})${r.slice(2)}`;
+  return `(${r.slice(0, 2)})${r.slice(2, 7)}-${r.slice(7)}`;
+}
+
 interface CompanySettingsFormProps {
   settings: CompanySettings;
   onSave: (settings: CompanySettings) => void;
   onManualSync?: () => void;
   isSyncing?: boolean;
+  hasSynced?: boolean;
 }
 
-export default function CompanySettingsForm({ settings, onSave, onManualSync, isSyncing }: CompanySettingsFormProps) {
-  const [formData, setFormData] = useState<CompanySettings>({ ...settings });
+export default function CompanySettingsForm({ settings, onSave, onManualSync, isSyncing, hasSynced = false }: CompanySettingsFormProps) {
+  const [formData, setFormData] = useState<CompanySettings>(() => {
+    let base = { ...settings };
+    const savedDraft = localStorage.getItem('draft_company_settings');
+    if (savedDraft) {
+      try {
+        base = { ...base, ...JSON.parse(savedDraft) };
+      } catch (_) {}
+    }
+    return {
+      ...base,
+      numero: base.numero || '',
+      complemento: base.complemento || ''
+    };
+  });
+
+  // Salva rascunho sempre que formData mudar
+  React.useEffect(() => {
+    localStorage.setItem('draft_company_settings', JSON.stringify(formData));
+  }, [formData]);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const certInputRef = useRef<HTMLInputElement>(null);
 
   const [loadingCnpj, setLoadingCnpj] = useState(false);
   const [cnpjError, setCnpjError] = useState<string | null>(null);
   const [cnpjSearchSuccess, setCnpjSearchSuccess] = useState(false);
+
+  const [loadingCep, setLoadingCep] = useState(false);
+  const [cepError, setCepError] = useState<string | null>(null);
+
+  const [isUploadingCert, setIsUploadingCert] = useState(false);
+  const [certError, setCertError] = useState<string | null>(null);
+
+  const handleCertUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingCert(true);
+    setCertError(null);
+
+    try {
+      const storageRef = ref(storage, `certificados/${Date.now()}_${file.name}`);
+      const snapshot = await uploadBytes(storageRef, file);
+      const downloadURL = await getDownloadURL(snapshot.ref);
+
+      const certInfo = {
+        nomeArquivo: file.name,
+        url: downloadURL,
+        dataUpload: new Date().toISOString(),
+      };
+      
+      const updated = {
+        ...formData,
+        certificadoDigital: certInfo
+      };
+      
+      setFormData(updated);
+      onSave(updated);
+      alert('Certificado Digital carregado e salvo na nuvem com sucesso!');
+    } catch (error: any) {
+      console.error('Erro ao fazer upload do certificado:', error);
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          const certInfo = {
+            nomeArquivo: file.name,
+            url: reader.result,
+            dataUpload: new Date().toISOString(),
+          };
+          const updated = {
+            ...formData,
+            certificadoDigital: certInfo
+          };
+          setFormData(updated);
+          onSave(updated);
+          alert('Certificado carregado localmente com sucesso (modo offline)!');
+        }
+      };
+      reader.readAsDataURL(file);
+    } finally {
+      setIsUploadingCert(false);
+    }
+  };
+
+  const handleRemoveCert = () => {
+    const updated = {
+      ...formData,
+      certificadoDigital: undefined
+    };
+    setFormData(updated);
+    onSave(updated);
+    if (certInputRef.current) certInputRef.current.value = '';
+    alert('Certificado Digital removido.');
+  };
 
   const buscarCNPJProprio = async (cnpjValue: string) => {
     const cleaned = cnpjValue.replace(/\D/g, '');
@@ -53,8 +150,6 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
 
       const parts = [
         data.logradouro,
-        data.numero ? `Nº ${data.numero}` : '',
-        data.complemento ? `(${data.complemento})` : '',
         data.bairro,
         data.municipio ? `${data.municipio}/${data.uf}` : '',
       ].filter(Boolean);
@@ -66,8 +161,10 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
         nomeFantasia: data.nome_fantasia || data.razao_social || prev.nomeFantasia,
         cep: formatCep(data.cep || prev.cep),
         endereco: parts.join(' - ') || prev.endereco,
+        numero: data.numero || '',
+        complemento: data.complemento || '',
         email: data.email || prev.email,
-        telefone: data.ddd && data.telefone ? `(${data.ddd}) ${data.telefone}` : prev.telefone,
+        telefone: data.ddd && data.telefone ? formatTelefone(data.ddd + data.telefone) : prev.telefone,
       }));
 
       setCnpjSearchSuccess(true);
@@ -79,6 +176,38 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
     }
   };
 
+  const buscarCEPPropria = async (cepCode: string) => {
+    const cleaned = cepCode.replace(/\D/g, '');
+    if (cleaned.length !== 8) return;
+    setLoadingCep(true);
+    setCepError(null);
+    try {
+      const response = await fetch(`https://viacep.com.br/ws/${cleaned}/json/`);
+      if (!response.ok) {
+        throw new Error('Erro ao buscar CEP');
+      }
+      const data = await response.json();
+      if (data.erro) {
+        throw new Error('CEP não encontrado');
+      }
+
+      const parts = [
+        data.logradouro,
+        data.bairro,
+        data.localidade ? `${data.localidade}/${data.uf}` : '',
+      ].filter(Boolean);
+
+      setFormData((prev) => ({
+        ...prev,
+        endereco: parts.join(' - ') || prev.endereco,
+      }));
+    } catch (err: any) {
+      setCepError('CEP inválido ou erro de conexão.');
+    } finally {
+      setLoadingCep(false);
+    }
+  };
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     let formattedVal = value;
@@ -86,6 +215,8 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
       formattedVal = formatCep(value);
     } else if (name === 'cnpj') {
       formattedVal = formatCnpj(value);
+    } else if (name === 'telefone') {
+      formattedVal = formatTelefone(value);
     }
     setFormData((prev) => ({ ...prev, [name]: formattedVal }));
   };
@@ -266,6 +397,59 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
           </div>
         </div>
 
+        {/* Bloco de Carregamento de Certificado Digital */}
+        <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 flex flex-col space-y-3">
+          <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider">
+            Certificado Digital (Assinatura Eletrônica)
+          </label>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3 rounded-lg border border-slate-200">
+            <div className="flex items-center space-x-2.5">
+              <div className={`p-2.5 rounded-lg ${formData.certificadoDigital ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                <ShieldCheck size={20} />
+              </div>
+              <div className="space-y-0.5">
+                <p className="text-xs font-bold text-slate-800">
+                  {formData.certificadoDigital ? formData.certificadoDigital.nomeArquivo : 'Nenhum certificado adicionado'}
+                </p>
+                <p className="text-[10px] text-slate-400 font-medium">
+                  {formData.certificadoDigital 
+                    ? `Enviado em ${new Date(formData.certificadoDigital.dataUpload).toLocaleDateString('pt-BR')}`
+                    : 'Suas propostas eletrônicas serão chanceladas'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2 shrink-0">
+              <input
+                type="file"
+                onChange={handleCertUpload}
+                ref={certInputRef}
+                className="hidden"
+                id="digital-cert-input"
+              />
+              <button
+                type="button"
+                disabled={isUploadingCert}
+                onClick={() => certInputRef.current?.click()}
+                className="flex items-center space-x-1.5 px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-600 border border-sky-200 text-xs font-bold rounded-lg shadow-sm transition active:scale-95 disabled:opacity-50 cursor-pointer"
+              >
+                <Upload size={13} />
+                <span>{isUploadingCert ? 'Adicionando...' : 'Adicionar Certificado Digital'}</span>
+              </button>
+
+              {formData.certificadoDigital && (
+                <button
+                  type="button"
+                  onClick={handleRemoveCert}
+                  className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded-lg transition cursor-pointer"
+                >
+                  <Trash size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
         {/* Inputs */}
         <div className="space-y-3">
           <div>
@@ -364,22 +548,38 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1">CEP *</label>
-              <input
-                type="text"
-                name="cep"
-                value={formData.cep}
-                onChange={handleChange}
-                required
-                autoCorrect="on"
-                spellCheck={true}
-                placeholder=""
-                className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent transition-all"
-              />
+              <div className="relative">
+                <input
+                  type="text"
+                  name="cep"
+                  value={formData.cep}
+                  onChange={(e) => {
+                    handleChange(e);
+                    const cleaned = e.target.value.replace(/\D/g, '');
+                    if (cleaned.length === 8) {
+                      buscarCEPPropria(cleaned);
+                    }
+                  }}
+                  required
+                  autoCorrect="on"
+                  spellCheck={true}
+                  placeholder=""
+                  className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent transition-all pr-10"
+                />
+                {loadingCep && (
+                  <span className="absolute right-3.5 top-2.5 text-sky-500 animate-spin">
+                    <RefreshCw size={14} />
+                  </span>
+                )}
+              </div>
+              {cepError && (
+                <p className="text-[10px] font-medium text-red-500 mt-1">{cepError}</p>
+              )}
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1">Endereço Completo *</label>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">Endereço (Sem o número) *</label>
             <div className="relative">
               <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
                 <MapPin size={16} />
@@ -392,8 +592,38 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
                 required
                 autoCorrect="on"
                 spellCheck={true}
-                placeholder=""
+                placeholder="Rua, avenida, travessa, etc."
                 className="w-full pl-10 pr-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent transition-all"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">Número *</label>
+              <input
+                type="text"
+                name="numero"
+                value={formData.numero}
+                onChange={handleChange}
+                required
+                autoCorrect="on"
+                spellCheck={true}
+                placeholder="Ex: 50"
+                className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">Complemento</label>
+              <input
+                type="text"
+                name="complemento"
+                value={formData.complemento}
+                onChange={handleChange}
+                autoCorrect="on"
+                spellCheck={true}
+                placeholder="Ex: Sala 42, Bloco B"
+                className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-transparent transition-all"
               />
             </div>
           </div>
@@ -461,7 +691,6 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
 
         {onManualSync && (
           <div className="pt-4 border-t border-slate-150 flex flex-col items-center space-y-2 mt-4">
-            <p className="text-[10px] text-slate-400 font-extrabold tracking-wider uppercase text-center">Sincronização de Nuvem</p>
             <button
               type="button"
               onClick={onManualSync}
@@ -472,8 +701,17 @@ export default function CompanySettingsForm({ settings, onSave, onManualSync, is
               title="Sincronizar dados com o Firebase"
             >
               <RefreshCw size={13} className={isSyncing ? 'animate-spin text-sky-400' : 'text-sky-600'} />
-              <span>{isSyncing ? 'SINCRONIZANDO COM FIREBASE...' : 'SINCRONIZAR AGORA COM O FIREBASE'}</span>
+              <span>Sincronização</span>
             </button>
+            <div className="text-[11px] font-semibold text-center pt-1">
+              {!hasSynced ? (
+                <span className="text-amber-600">Aguardando clique no botão Sincronização</span>
+              ) : (
+                <span className="text-emerald-600 flex items-center justify-center gap-1">
+                  <Check size={14} /> Sincronizado com sucesso!
+                </span>
+              )}
+            </div>
           </div>
         )}
       </form>

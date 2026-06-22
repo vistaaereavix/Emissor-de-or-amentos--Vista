@@ -23,10 +23,23 @@ function formatarMoeda(valor: number): string {
   });
 }
 
-export function gerarOrcamentoPDF(
+// Formata CNPJ de acordo com a máscara oficial do Brasil XX.XXX.XXX/XXXX-XX
+function formatarCNPJ(v: string): string {
+  if (!v) return '';
+  const digits = v.replace(/\D/g, '').slice(0, 14);
+  if (digits.length !== 14) {
+    return v;
+  }
+  return digits.replace(
+    /^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,
+    "$1.$2.$3/$4-$5"
+  );
+}
+
+export async function gerarOrcamentoPDF(
   orcamento: Orcamento,
   empresa: CompanySettings
-): void {
+): Promise<void> {
   // Inicializa o jsPDF no formato A4, unidade milímetros (mm)
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -47,392 +60,382 @@ export function gerarOrcamentoPDF(
     if (currentY + neededHeight > pageHeight - 15) {
       doc.addPage();
       currentY = 15;
-      drawPageHeader();
     }
   }
 
-  // Desenha o cabeçalho de página padrão (útil para multi-páginas)
-  function drawPageHeader() {
-    // Linha decorativa no topo (azul institucional)
-    doc.setFillColor(14, 165, 233); // Sky Blue (#0ea5e9)
-    doc.rect(marginX, currentY, contentWidth, 1.5, 'F');
-    currentY += 4;
+  // Função auxiliar para desenhar o título de seção com estilo compacto identico ao HTML
+  function drawSectionTitle(text: string): void {
+    checkSpace(12);
+    // Retângulo cinza de fundo
+    doc.setFillColor(242, 242, 242);
+    doc.rect(marginX, currentY, contentWidth, 6, 'F');
+    // Borda escura na esquerda (3px solid #333 correspondente a 1mm)
+    doc.setFillColor(51, 51, 51);
+    doc.rect(marginX, currentY, 1, 6, 'F');
+
+    doc.setFont('Helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(51, 51, 51);
+    doc.text(text.toUpperCase(), marginX + 3.5, currentY + 4.2);
+    currentY += 10; // Espaço após o título
   }
 
-  // 1. TOPO & EMITENTE (Cabeçalho principal)
-  // Adiciona a primeira linha decorativa
-  drawPageHeader();
+  // =========================================================================
+  // 1. CABEÇALHO DA EMPRESA (Tabela de 2 colunas sem borda com linha inferior grossa)
+  // =========================================================================
+  const logoWidth = 40;
+  const logoHeight = 30; // 30mm = 3cm de altura exata do logo
+  const logoX = marginX;
+  const logoY = currentY;
+  let hasLogo = false;
 
-  const logoHeight = 30;
-  const logoWidth = 30;
-  const boxX = 145;
-  let textStartX = marginX;
-
-  // Verifica se existe logo
   if (empresa.logo && empresa.logo.trim() !== '') {
     try {
-      // Adiciona o logo da empresa (base64)
-      doc.addImage(empresa.logo, 'JPEG', marginX, currentY, logoWidth, logoHeight);
-      textStartX = marginX + logoWidth + 6; // Desloca texto do emitente para a direita
+      const format = empresa.logo.includes('image/png') ? 'PNG' : 'JPEG';
+      doc.addImage(empresa.logo, format, logoX, logoY, logoWidth, logoHeight);
+      hasLogo = true;
     } catch (e) {
       console.error('Erro ao processar imagem do logo em PDF:', e);
-      // Fallback se falhar
-      textStartX = marginX;
     }
   }
 
-  // Bloco Emitter à esquerda
-  const maxTextWidth = boxX - textStartX - 4;
-  doc.setTextColor(30, 41, 59); // Slate 800
+  // Lado esquerdo: Dados do prestador
+  // Se tiver logo, começa em marginX + logoX + logoWidth + 6. Se não, começa em marginX.
+  const providerX = hasLogo ? marginX + logoWidth + 6 : marginX;
+  const providerWidth = pageWidth - marginX - providerX - 58; // Deixa 58mm para os metadados do orçamento à direita
+
+  doc.setFont('Helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.setTextColor(15, 23, 42); // Slate 900
+  // Linha 1: Nome Fantasia (Alinhado com o topo do logotipo)
+  doc.text(empresa.nomeFantasia || 'Vista Aérea Drone LTDA', providerX, logoY + 4.5);
+
+  doc.setFont('Helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(71, 85, 105); // Slate 600
+
+  // Linha 2: CNPJ (Perfeitamente posicionado)
+  const formattedCNPJ = formatarCNPJ(empresa.cnpj || '32216083000147');
+  doc.text(`CNPJ: ${formattedCNPJ}`, providerX, logoY + 9.5);
+
+  // Linha 3 & 4: Endereço (com tamanho controlado para caber na altura exata do logo)
+  let formattedEndereco = empresa.endereco || '';
+  if (empresa.numero) {
+    formattedEndereco += `, Nº ${empresa.numero}`;
+  }
+  if (empresa.complemento) {
+    formattedEndereco += ` - ${empresa.complemento}`;
+  }
+  if (empresa.cep) {
+    formattedEndereco += ` - CEP: ${empresa.cep}`;
+  }
+  const enderecoText = `End: ${formattedEndereco || 'Sereia de Itapuã, Nº 81 - Itapuã - Vila Velha/ES - CEP: 29101-530'}`;
+  const splitEndereco = doc.splitTextToSize(enderecoText, providerWidth);
+  
+  // Limita endereço a duas linhas para manter balanço estrito
+  const maxEndLines = splitEndereco.slice(0, 2);
+  doc.text(maxEndLines, providerX, logoY + 14.5);
+
+  // Linha 5: Telefone e E-mail (Sancionados ao limite inferior da altura do logo)
+  const telMailY = logoY + 14.5 + (maxEndLines.length * 4) + 1.5;
+  doc.text(`Tel: ${empresa.telefone || '(27) 98127-7344'}`, providerX, telMailY);
+  doc.text(`E-mail: ${empresa.email || 'vistaaereavix@gmail.com'}`, providerX, telMailY + 4);
+
+  // Lado direito: Orçamento # e data (Alinhados com a altura do logo)
+  const budgetRightX = pageWidth - marginX;
+  
   doc.setFont('Helvetica', 'bold');
   doc.setFontSize(14);
-  const emitenteNome = empresa.nomeFantasia || 'Sua Empresa / Emitente';
-  
-  const nameLines = doc.splitTextToSize(emitenteNome, maxTextWidth);
-  let nameY = currentY + 4;
-  nameLines.forEach((line: string) => {
-    doc.text(line, textStartX, nameY);
-    nameY += 4.5;
-  });
+  doc.setTextColor(15, 23, 42); // Slate 900
+  // Orçamento ID no topo direito
+  doc.text(`Orçamento #${orcamento.numero}`, budgetRightX, logoY + 4.5, { align: 'right' });
 
   doc.setFont('Helvetica', 'normal');
   doc.setFontSize(8.5);
-  doc.setTextColor(71, 85, 105); // Slate 600
+  doc.setTextColor(100, 116, 139); // Slate 500
+  doc.text(`Emissão: ${formatarData(orcamento.dataCriacao)}`, budgetRightX, logoY + 9.5, { align: 'right' });
   
-  let lineY = nameY + 0.5;
-  if (empresa.razaoSocial) {
-    const rSocialLines = doc.splitTextToSize(`Razão Social: ${empresa.razaoSocial}`, maxTextWidth);
-    rSocialLines.forEach((line: string) => {
-      doc.text(line, textStartX, lineY);
-      lineY += 4;
-    });
-  }
-  if (empresa.cnpj) {
-    const cnpjLines = doc.splitTextToSize(`CNPJ: ${empresa.cnpj}`, maxTextWidth);
-    cnpjLines.forEach((line: string) => {
-      doc.text(line, textStartX, lineY);
-      lineY += 4;
-    });
-  }
-  if (empresa.endereco) {
-    const endLines = doc.splitTextToSize(`End: ${empresa.endereco} ${empresa.cep ? `- CEP: ${empresa.cep}` : ''}`, maxTextWidth);
-    endLines.forEach((line: string) => {
-      doc.text(line, textStartX, lineY);
-      lineY += 4;
-    });
-  }
-  
-  // E-mail e Tel na mesma linha para economizar espaço se couber
-  const telEmailStr = `${empresa.telefone ? `Tel: ${empresa.telefone}` : ''}${empresa.telefone && empresa.email ? ' | ' : ''}${empresa.email ? `E-mail: ${empresa.email}` : ''}`;
-  if (telEmailStr) {
-    const telEmailLines = doc.splitTextToSize(telEmailStr, maxTextWidth);
-    telEmailLines.forEach((line: string) => {
-      doc.text(line, textStartX, lineY);
-      lineY += 4;
-    });
-  }
-
-  // Bloco Número Orçamento à direita
-  const boxW = 50;
-  const boxH = 26;
-  doc.setFillColor(241, 245, 249); // Slate 100 background
-  doc.rect(boxX, currentY, boxW, boxH, 'F');
-  doc.setDrawColor(203, 213, 225); // Slate 200 border
-  doc.setLineWidth(0.3);
-  doc.rect(boxX, currentY, boxW, boxH, 'D');
-
-  doc.setTextColor(30, 41, 59); // Slate 800
   doc.setFont('Helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.text('ORÇAMENTO', boxX + boxW / 2, currentY + 6, { align: 'center' });
-  
-  doc.setFontSize(16);
-  doc.setTextColor(14, 165, 233); // Sky Blue code number
-  doc.text(`Nº ${orcamento.numero}`, boxX + boxW / 2, currentY + 14.5, { align: 'center' });
+  doc.setFontSize(8.5);
+  doc.setTextColor(2, 132, 199); // Sky 600
+  doc.text(`VALOR TOTAL: ${formatarMoeda(orcamento.valorTotal)}`, budgetRightX, logoY + 15, { align: 'right' });
+
+  // Define currentY logo após a altura total do cabeçalho
+  currentY = logoY + logoHeight + 6;
+
+  // Linha inferior grossa do cabeçalho
+  doc.setDrawColor(15, 23, 42); // Slate 900
+  doc.setLineWidth(0.6);
+  doc.line(marginX, currentY, pageWidth - marginX, currentY);
+  currentY += 6;
+
+  // =========================================================================
+  // 2. DADOS DO CLIENTE
+  // =========================================================================
+  drawSectionTitle('Dados do Cliente');
+  checkSpace(18);
 
   doc.setFont('Helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.setTextColor(100, 116, 139); // Slate 500
-  doc.text(`Data: ${formatarData(orcamento.dataCriacao)}`, boxX + boxW / 2, currentY + 20, { align: 'center' });
+  doc.setFontSize(8.5);
+  doc.setTextColor(51, 51, 51);
 
-  currentY = Math.max(currentY + logoHeight + 4, lineY + 5);
-
-  // Espaçador / Divisória
-  doc.setDrawColor(226, 232, 240); // Slate 200
-  doc.setLineWidth(0.2);
-  doc.line(marginX, currentY, pageWidth - marginX, currentY);
-  currentY += 5;
-
-  // 2. DADOS DO CLIENTE (Bloco de destaque azulado / cinza claro)
-  checkSpace(32);
+  doc.text(`Razão Social: ${orcamento.clienteNome}`, marginX, currentY);
+  doc.text(`CPF/CNPJ: ${orcamento.clienteDocumento || 'Não informado'} | E-mail: ${orcamento.clienteEmail || 'Não informado'} | Tel: ${orcamento.clienteTelefone || 'Não informado'}`, marginX, currentY + 4);
   
-  doc.setFillColor(248, 250, 252); // Slate 50 background
-  const clientBoxH = 26;
-  doc.rect(marginX, currentY, contentWidth, clientBoxH, 'F');
-  doc.setDrawColor(226, 232, 240); // Slate 200 border
-  doc.rect(marginX, currentY, contentWidth, clientBoxH, 'D');
+  const clientAddr = `Endereço: ${orcamento.clienteEndereco || 'Não informado'}`;
+  const splitClientAddr = doc.splitTextToSize(clientAddr, contentWidth);
+  doc.text(splitClientAddr, marginX, currentY + 8);
 
-  // Badge do Cliente
-  doc.setFillColor(30, 41, 59); // Slate 800
-  doc.rect(marginX + 4, currentY + 3, 20, 4.5, 'F');
+  currentY += 8 + (splitClientAddr.length * 4) + 4;
+
+  // =========================================================================
+  // 3. PRODUTOS E SERVIÇOS DETALHADOS (Tabela compacta com borda de 1px cinza)
+  // =========================================================================
+  drawSectionTitle('Produtos e Serviços Detalhados');
+  checkSpace(20);
+
+  // Largura das colunas otimizada para evitar transbordamento (tabulação perfeita)
+  const colItemW = contentWidth * 0.05; // 9mm
+  const colDescrW = contentWidth * 0.48; // 86.4mm
+  const colCondW = contentWidth * 0.10; // 18mm
+  const colQtdW = contentWidth * 0.07; // 12.6mm
+  const colVlrUnitW = contentWidth * 0.15; // 27mm
+  const colVlrTotW = contentWidth * 0.15; // 27mm
+
+  // Cabeçalho da tabela (background-color: #f2f2f2, font-weight: bold)
+  doc.setFillColor(242, 242, 242);
+  doc.rect(marginX, currentY, contentWidth, 7, 'F');
+  
+  doc.setDrawColor(204, 204, 204); // Célula border 1px solid #ccc
+  doc.setLineWidth(0.2);
+  doc.rect(marginX, currentY, contentWidth, 7, 'S');
+
   doc.setFont('Helvetica', 'bold');
   doc.setFontSize(7.5);
-  doc.setTextColor(255, 255, 255);
-  doc.text('CLIENTE', marginX + 14, currentY + 6.3, { align: 'center' });
+  doc.setTextColor(51, 51, 51);
 
-  // Nome e Documento do cliente
-  doc.setFontSize(10);
-  doc.setTextColor(15, 23, 42); // Slate 900
-  doc.setFont('Helvetica', 'bold');
-  doc.text(orcamento.clienteNome, marginX + 28, currentY + 6.5);
-
-  doc.setFont('Helvetica', 'normal');
-  doc.setFontSize(8.5);
-  doc.setTextColor(71, 85, 105); // Slate 600
+  // Desenha as divisões das colunas do cabeçalho
+  let accumX = marginX;
+  doc.text('#', accumX + colItemW/2, currentY + 4.8, { align: 'center' });
+  doc.line(accumX + colItemW, currentY, accumX + colItemW, currentY + 7);
   
-  // Coluna 1 do Cliente (Documento e Email)
-  doc.text(`CPF/CNPJ: ${orcamento.clienteDocumento || 'Não informado'}`, marginX + 6, currentY + 13);
-  doc.text(`E-mail: ${orcamento.clienteEmail || 'Não informado'}`, marginX + 6, currentY + 18);
-  doc.text(`Endereço: ${orcamento.clienteEndereco || 'Não informado'}`, marginX + 6, currentY + 23);
+  accumX += colItemW;
+  doc.text('Descrição do Produto / Serviço', accumX + 2, currentY + 4.8);
+  doc.line(accumX + colDescrW, currentY, accumX + colDescrW, currentY + 7);
 
-  currentY += clientBoxH + 6;
+  accumX += colDescrW;
+  doc.text('Condição', accumX + colCondW/2, currentY + 4.8, { align: 'center' });
+  doc.line(accumX + colCondW, currentY, accumX + colCondW, currentY + 7);
 
-  // 3. TABELA DE ITENS (Produtos / Serviços)
-  checkSpace(25);
-  doc.setFont('Helvetica', 'bold');
-  doc.setFontSize(10);
-  doc.setTextColor(30, 41, 59); // Slate 800
-  doc.text('PRODUTOS E SERVIÇOS DETALHADOS', marginX, currentY);
-  currentY += 4.5;
+  accumX += colCondW;
+  doc.text('Qtd', accumX + colQtdW/2, currentY + 4.8, { align: 'center' });
+  doc.line(accumX + colQtdW, currentY, accumX + colQtdW, currentY + 7);
 
-  // Cabeçalho da tabela de itens
-  const colItemW = 8;
-  const colDescrW = 92;
-  const colCondW = 20;
-  const colQtdW = 15;
-  const colVlrUnitW = 22;
-  const colVlrTotW = 23;
+  accumX += colQtdW;
+  doc.text('V. Unitário', accumX + colVlrUnitW - 2, currentY + 4.8, { align: 'right' });
+  doc.line(accumX + colVlrUnitW, currentY, accumX + colVlrUnitW, currentY + 7);
 
-  const tableHeaderX = marginX;
-  doc.setFillColor(30, 41, 59); // Slate 800 (Fundo moderno institucional)
-  doc.rect(tableHeaderX, currentY, contentWidth, 7.5, 'F');
+  accumX += colVlrUnitW;
+  doc.text('Total', accumX + colVlrTotW - 2, currentY + 4.8, { align: 'right' });
 
-  doc.setFont('Helvetica', 'bold');
-  doc.setFontSize(8);
-  doc.setTextColor(255, 255, 255);
+  currentY += 7;
 
-  let currentX = tableHeaderX;
-  doc.text('#', currentX + colItemW / 2, currentY + 5, { align: 'center' });
-  currentX += colItemW;
-  doc.text('Descrição do Produto / Serviço', currentX + 3, currentY + 5);
-  currentX += colDescrW;
-  doc.text('Condição', currentX + colCondW / 2, currentY + 5, { align: 'center' });
-  currentX += colCondW;
-  doc.text('Qtd', currentX + colQtdW / 2, currentY + 5, { align: 'center' });
-  currentX += colQtdW;
-  doc.text('V. Unitário', currentX + colVlrUnitW - 3, currentY + 5, { align: 'right' });
-  currentX += colVlrUnitW;
-  doc.text('Total', currentX + colVlrTotW - 3, currentY + 5, { align: 'right' });
-
-  currentY += 7.5;
-  doc.setFont('Helvetica', 'normal');
-
-  // Desenha cada linha do item
+  // Linhas de itens
   orcamento.items.forEach((item, index) => {
-    // Estimativa de altura: descrição pode ter modelo/marca na segunda linha
-    const rowHeight = 9.5;
+    // Evita transbordamento separando e medindo o título do item com splitTextToSize
+    const splitNome = doc.splitTextToSize(item.nome, colDescrW - 4);
+    
+    // Mede as especificações adicionais
+    const detailsStr = `${item.marca ? `Marca: ${item.marca}` : ''}${item.marca && item.modelo ? ' | ' : ''}${item.modelo ? `Modelo: ${item.modelo}` : ''}${item.ncm ? ` | NCM: ${item.ncm}` : ''}`;
+    const splitDetails = detailsStr ? doc.splitTextToSize(detailsStr, colDescrW - 4) : [];
+    
+    // Altura ideal calculada dinamicamente baseada em todas as linhas para evitar qualquer estouro ou corte
+    const nameLineCount = splitNome.length;
+    const detailsLineCount = splitDetails.length;
+    
+    // Equação estrita de expansão vertical de células para conter o texto por completo sem sobreposições
+    const calculatedHeight = 5.5 + (nameLineCount * 4.0) + (detailsLineCount > 0 ? (detailsLineCount * 3.4) + 1.5 : 0);
+    const rowHeight = Math.max(10, calculatedHeight);
+    
     checkSpace(rowHeight);
 
-    // Zebra stripes para facilitar leitura
-    if (index % 2 === 1) {
-      doc.setFillColor(248, 250, 252); // Slate 50
-    } else {
-      doc.setFillColor(255, 255, 255);
-    }
-    doc.rect(marginX, currentY, contentWidth, rowHeight, 'F');
-    
-    // Borda fina embaixo de cada item
-    doc.setDrawColor(241, 245, 249); // Slate 100
-    doc.setLineWidth(0.3);
-    doc.line(marginX, currentY + rowHeight, marginX + contentWidth, currentY + rowHeight);
+    // Borda externa do registro do item
+    doc.rect(marginX, currentY, contentWidth, rowHeight, 'S');
 
     doc.setFont('Helvetica', 'normal');
     doc.setFontSize(8);
-    doc.setTextColor(30, 41, 59); // Slate 800
+    doc.setTextColor(51, 51, 51);
 
     let drawX = marginX;
-    
-    // Numeração do item
-    doc.text(String(index + 1), drawX + colItemW / 2, currentY + 5.5, { align: 'center' });
+
+    // Alinhamento vertical centralizado perfeito dos marcadores e valores numéricos
+    const textCenterY = currentY + (rowHeight / 2) + 1.2;
+
+    // Col 1: #
+    doc.text(String(index + 1), drawX + colItemW/2, textCenterY, { align: 'center' });
+    doc.line(drawX + colItemW, currentY, drawX + colItemW, currentY + rowHeight);
     drawX += colItemW;
 
-    // Nome / Marca / Modelo / NCM
+    // Col 2: Descrição (desenhada linha por linha com controle de Y rígido)
     doc.setFont('Helvetica', 'bold');
-    doc.text(item.nome, drawX + 3, currentY + 4);
+    let descrY = currentY + 4.5;
+    splitNome.forEach((line: string) => {
+      doc.text(line, drawX + 2, descrY);
+      descrY += 4.0;
+    });
     
-    doc.setFont('Helvetica', 'normal');
-    doc.setFontSize(7.5);
-    doc.setTextColor(100, 116, 139); // Slate 500
-    const details = `${item.marca ? `Marca: ${item.marca}` : ''}${item.marca && item.modelo ? ' | ' : ''}${item.modelo ? `Modelo: ${item.modelo}` : ''}${item.ncm ? ` | NCM: ${item.ncm}` : ''}`;
-    doc.text(details || 'Sem especificações específicas', drawX + 3, currentY + 7.5);
+    if (splitDetails.length > 0) {
+      doc.setFont('Helvetica', 'normal');
+      doc.setFontSize(6.8);
+      doc.setTextColor(102, 102, 102); // Gray 600
+      descrY += 0.5; // Margem para as especificações
+      splitDetails.forEach((line: string) => {
+        doc.text(line, drawX + 2, descrY);
+        descrY += 3.4;
+      });
+    }
+    
+    doc.setDrawColor(204, 204, 204);
+    doc.line(drawX + colDescrW, currentY, drawX + colDescrW, currentY + rowHeight);
     drawX += colDescrW;
 
-    // Condição
+    // Col 3: Condição
+    doc.setFont('Helvetica', 'normal');
     doc.setFontSize(8);
-    doc.setTextColor(30, 41, 59);
-    doc.text(item.condicao, drawX + colCondW / 2, currentY + 5.5, { align: 'center' });
+    doc.setTextColor(51, 51, 51);
+    doc.text(item.condicao, drawX + colCondW/2, textCenterY, { align: 'center' });
+    doc.line(drawX + colCondW, currentY, drawX + colCondW, currentY + rowHeight);
     drawX += colCondW;
 
-    // Quantidade
-    doc.text(String(item.quantidade), drawX + colQtdW / 2, currentY + 5.5, { align: 'center' });
+    // Col 4: Qtd
+    doc.text(String(item.quantidade), drawX + colQtdW/2, textCenterY, { align: 'center' });
+    doc.line(drawX + colQtdW, currentY, drawX + colQtdW, currentY + rowHeight);
     drawX += colQtdW;
 
-    // V. Unitário
-    doc.text(formatarMoeda(item.precoUnitario), drawX + colVlrUnitW - 3, currentY + 5.5, { align: 'right' });
+    // Col 5: V. Unitário
+    doc.text(formatarMoeda(item.precoUnitario), drawX + colVlrUnitW - 2, textCenterY, { align: 'right' });
+    doc.line(drawX + colVlrUnitW, currentY, drawX + colVlrUnitW, currentY + rowHeight);
     drawX += colVlrUnitW;
 
-    // V. Total
+    // Col 6: Total
     doc.setFont('Helvetica', 'bold');
-    doc.text(formatarMoeda(item.quantidade * item.precoUnitario), drawX + colVlrTotW - 3, currentY + 5.5, { align: 'right' });
+    doc.text(formatarMoeda(item.quantidade * item.precoUnitario), drawX + colVlrTotW - 2, textCenterY, { align: 'right' });
 
     currentY += rowHeight;
   });
 
-  // 4. TOTAL (Resumo do valor à direita)
-  checkSpace(12);
-  const totalBoxW = 60;
-  const totalBoxX = pageWidth - marginX - totalBoxW;
+  // Linhas de TOTAIS (VALOR TOTAL)
+  checkSpace(8);
+  doc.rect(marginX, currentY, contentWidth, 7, 'S');
   
-  doc.setFillColor(241, 245, 249); // Slate 100 background
-  doc.rect(totalBoxX, currentY + 2, totalBoxW, 9, 'F');
-  doc.setDrawColor(203, 213, 225); // Slate 200 border
-  doc.rect(totalBoxX, currentY + 2, totalBoxW, 9, 'D');
-
+  // Rótulo VALOR TOTAL
   doc.setFont('Helvetica', 'bold');
   doc.setFontSize(8.5);
-  doc.setTextColor(71, 85, 105); // Slate 600
-  doc.text('TOTAL DO ORÇAMENTO:', totalBoxX + 3, currentY + 7.8);
+  doc.setTextColor(51, 51, 51);
+  const totalLabelX = marginX + colItemW + colDescrW + colCondW + colQtdW;
+  doc.text('VALOR TOTAL:', totalLabelX - 2, currentY + 4.8, { align: 'right' });
+  doc.line(totalLabelX, currentY, totalLabelX, currentY + 7);
+
+  // Valor Total
+  doc.text(formatarMoeda(orcamento.valorTotal), pageWidth - marginX - 2, currentY + 4.8, { align: 'right' });
+  currentY += 12;
+
+  // =========================================================================
+  // 4. CONDIÇÕES E TERMOS COMERCIAIS
+  // =========================================================================
+  drawSectionTitle('Condições e Termos Comerciais');
+  checkSpace(16);
+
+  doc.setFont('Helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(51, 51, 51);
+
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Prazo de Garantia:', marginX, currentY);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(orcamento.tempoGarantia || 'Não informado', marginX + 30, currentY);
+
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Condições de Pagamento:', marginX, currentY + 4.5);
+  doc.setFont('Helvetica', 'normal');
   
-  doc.setFontSize(10);
-  doc.setTextColor(14, 165, 233); // Sky Blue para o preço total
-  doc.text(formatarMoeda(orcamento.valorTotal), totalBoxX + totalBoxW - 3, currentY + 7.8, { align: 'right' });
+  // Evita estouro de caracteres longos fazendo quebra de linha dinâmica com splitTextToSize
+  const condText = orcamento.condicoesPagamento || 'Não informado';
+  const splitCond = doc.splitTextToSize(condText, contentWidth - 42);
+  doc.text(splitCond, marginX + 42, currentY + 4.5);
+  
+  const condOffset = (splitCond.length - 1) * 4;
 
-  currentY += 16;
+  doc.setFont('Helvetica', 'bold');
+  doc.text('Tempo de Execução:', marginX, currentY + 9 + condOffset);
+  doc.setFont('Helvetica', 'normal');
+  doc.text(orcamento.tempoExecucao || 'Não informado', marginX + 32, currentY + 9 + condOffset);
 
-  // 5. CONDIÇÕES, GARANTIA & OBSERVAÇÕES
+  currentY += 15 + condOffset;
+
+  // =========================================================================
+  // 5. OBSERVAÇÕES
+  // =========================================================================
+  drawSectionTitle('Observações do Equipamento / Detalhes de Serviço');
+  
   const rawObs = orcamento.observacoes || 'Nenhuma observação informada.';
-  doc.setFont('Helvetica', 'normal');
-  doc.setFontSize(8);
-  const splitObs = doc.splitTextToSize(rawObs, contentWidth - 10); // 10mm padding inside box
+  const splitObs = doc.splitTextToSize(rawObs, contentWidth - 4);
+  const obsBoxHeight = Math.max(9, (splitObs.length * 4) + 4);
   
-  // Basic info panel: 14mm height. Spacing: 5mm. Header: 5mm.
-  // Observations block height is number of lines * 4 + 10mm padding
-  const obsBlockHeight = Math.max(16, (splitObs.length * 4) + 10);
-  const totalNeededHeight = 35 + obsBlockHeight;
+  checkSpace(obsBoxHeight + 5);
 
-  checkSpace(totalNeededHeight);
-
-  doc.setFont('Helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(30, 41, 59); // Slate 800
-  doc.text('CONDIÇÕES E TERMOS COMERCIAIS', marginX, currentY);
-  currentY += 4;
-
-  // Retângulo cinza claro para as condições gerais
-  const condBoxH = 14;
-  doc.setFillColor(248, 250, 252); // Slate 50
-  doc.rect(marginX, currentY, contentWidth, condBoxH, 'F');
-  doc.setDrawColor(226, 232, 240); // Slate 200
-  doc.rect(marginX, currentY, contentWidth, condBoxH, 'D');
-
-  doc.setFontSize(8);
-  doc.setTextColor(71, 85, 105);
-
-  // Garantia e Prazo de Execução lado a lado
-  doc.setFont('Helvetica', 'bold');
-  doc.text('Prazo de Garantia:', marginX + 4, currentY + 5);
-  doc.setFont('Helvetica', 'normal');
-  doc.text(orcamento.tempoGarantia || 'Não informado', marginX + 33, currentY + 5);
-
-  doc.setFont('Helvetica', 'bold');
-  doc.text('Tempo de Execução:', marginX + 90, currentY + 5);
-  doc.setFont('Helvetica', 'normal');
-  doc.text(orcamento.tempoExecucao || 'Imediato', marginX + 122, currentY + 5);
-
-  // Forma de pagamento
-  doc.setFont('Helvetica', 'bold');
-  doc.text('Condições de Pagamento:', marginX + 4, currentY + 10);
-  doc.setFont('Helvetica', 'normal');
-  doc.text(orcamento.condicoesPagamento || 'A combinar', marginX + 41, currentY + 10);
-
-  currentY += condBoxH + 5;
-
-  // Bloco de Diagnóstico / Observações do Equipamento
-  doc.setFont('Helvetica', 'bold');
-  doc.setFontSize(8.5);
-  doc.setTextColor(30, 41, 59);
-  doc.text('OBSERVAÇÕES DO EQUIPAMENTO / DETALHES DE SERVIÇO', marginX, currentY);
-  currentY += 3.5;
-
-  // Amber diagnostic box
-  doc.setFillColor(255, 251, 235); // Amber 50
-  doc.rect(marginX, currentY, contentWidth, obsBlockHeight, 'F');
-  doc.setDrawColor(252, 211, 77); // Amber 200
-  doc.rect(marginX, currentY, contentWidth, obsBlockHeight, 'D');
+  // Caixa de observações estilizada (border: 1px solid #ccc; background-color: #fafafa;)
+  doc.setFillColor(250, 250, 250);
+  doc.setDrawColor(204, 204, 204);
+  doc.rect(marginX, currentY, contentWidth, obsBoxHeight, 'F');
+  doc.rect(marginX, currentY, contentWidth, obsBoxHeight, 'S');
 
   doc.setFont('Helvetica', 'normal');
   doc.setFontSize(8);
-  doc.setTextColor(146, 64, 14); // Brown-Amber 800 for elegant readability
+  doc.setTextColor(51, 51, 51);
 
-  let obsLineY = currentY + 5.5;
+  let obsTextY = currentY + 4.2;
   splitObs.forEach((line: string) => {
-    doc.text(line, marginX + 5, obsLineY);
-    obsLineY += 4.2;
+    doc.text(line, marginX + 2, obsTextY);
+    obsTextY += 4;
   });
 
-  currentY += obsBlockHeight + 10;
+  currentY += obsBoxHeight + 10;
 
-  // 6. BLOCOS DE ASSINATURA (Sincronizado e centralizado ao rodapé)
-  checkSpace(36);
+  // =========================================================================
+  // 6. ASSINATURAS
+  // =========================================================================
+  checkSpace(28);
 
-  const signatureW = 70;
-  const signatureLineY = currentY + 12;
-  
-  // Assinatura Prestador (Emitente)
-  const providerX = marginX + 10;
-  doc.setDrawColor(148, 163, 184); // Slate 400 line
-  doc.setLineWidth(0.4);
-  doc.line(providerX, signatureLineY, providerX + signatureW, signatureLineY);
+  const sigLineW = 70;
+  const sigY = currentY + 16;
+
+  // Esquerda: Vista Aérea Drone LTDA
+  const sigLeftX = marginX + 8;
+  doc.setDrawColor(51, 51, 51);
+  doc.setLineWidth(0.3);
+  doc.line(sigLeftX, sigY, sigLeftX + sigLineW, sigY);
   
   doc.setFont('Helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setTextColor(51, 51, 51);
+  doc.text('VISTA AÉREA DRONE LTDA', sigLeftX + sigLineW/2, sigY + 4, { align: 'center' });
+
+  // Direita: Cliente
+  const sigRightX = pageWidth - marginX - sigLineW - 8;
+  doc.line(sigRightX, sigY, sigRightX + sigLineW, sigY);
+  doc.text(orcamento.clienteNome.toUpperCase(), sigRightX + sigLineW/2, sigY + 4, { align: 'center' });
+
+  // =========================================================================
+  // 7. FOOTER NOTE
+  // =========================================================================
+  checkSpace(12);
+  doc.setFont('Helvetica', 'normal');
   doc.setFontSize(7.5);
-  doc.setTextColor(30, 41, 59);
-  doc.text(empresa.nomeFantasia || 'Prestador de Serviços', providerX + signatureW / 2, signatureLineY + 4, { align: 'center' });
-  doc.setFont('Helvetica', 'normal');
-  doc.setTextColor(148, 163, 184);
-  doc.text('Responsável Técnico', providerX + signatureW / 2, signatureLineY + 7.5, { align: 'center' });
-
-  // Assinatura Cliente
-  const clientX = pageWidth - marginX - signatureW - 10;
-  doc.line(clientX, signatureLineY, clientX + signatureW, signatureLineY);
-
-  doc.setFont('Helvetica', 'bold');
-  doc.setTextColor(30, 41, 59);
-  doc.text(orcamento.clienteNome, clientX + signatureW / 2, signatureLineY + 4, { align: 'center' });
-  doc.setFont('Helvetica', 'normal');
-  doc.setTextColor(148, 163, 184);
-  doc.text('Aceito e Autorizado em: ___/___/______', clientX + signatureW / 2, signatureLineY + 7.5, { align: 'center' });
-
-  // Rodapé decorativo com link do App
-  currentY += 26;
-  checkSpace(10);
-  
-  doc.setFont('Helvetica', 'normal');
-  doc.setFontSize(7);
-  doc.setTextColor(148, 163, 184);
+  doc.setTextColor(119, 119, 119); // Muted gray #777
   doc.text('Este documento é uma proposta comercial de prestação de serviços/venda gerada digitalmente.', pageWidth / 2, pageHeight - 10, { align: 'center' });
 
-  // Dispara o download com o nome adaptado
-  const nomeArquivo = `Orcamento_${orcamento.numero}_${orcamento.clienteNome.replace(/\s+/g, '_')}.pdf`;
+  // Dispara o download com o nome adaptado exatamente: "orçamento de [Nome do Cliente].pdf"
+  const nomeArquivo = `orçamento de ${orcamento.clienteNome}.pdf`;
   doc.save(nomeArquivo);
 }
