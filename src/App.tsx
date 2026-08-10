@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { CompanySettings, Cliente, Produto, Orcamento } from './types';
+import { CompanySettings, Cliente, Produto, Orcamento, Recibo } from './types';
 import {
   INITIAL_COMPANY_SETTINGS,
   INITIAL_CLIENTS,
   INITIAL_PRODUCTS,
   INITIAL_BUDGETS,
 } from './utils/initialData';
+import { parseCompanyCityAndUf } from './utils/addressUtils';
 
 import CompanySettingsForm from './components/CompanySettingsForm';
 import ClientRegistration from './components/ClientRegistration';
@@ -14,16 +15,57 @@ import BudgetGenerator from './components/BudgetGenerator';
 import AuthScreen from './components/AuthScreen';
 import Dashboard from './components/Dashboard';
 import BudgetPreviewModal from './components/BudgetPreviewModal';
+import FiscalModule from './components/FiscalModule';
+import FloatingNavigation from './components/FloatingNavigation';
+import SidebarDesktop from './components/SidebarDesktop';
 import { gerarOrcamentoPDF } from './utils/pdfGenerator';
 
-import { FileText, Users, ShoppingBag, Building, Cpu, RefreshCw, LogOut, LayoutDashboard } from 'lucide-react';
+import { Cpu, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { doc, getDoc, getDocs, setDoc, deleteDoc, collection } from 'firebase/firestore';
-import { db } from './firebase';
+import { doc, getDoc, getDocs, setDoc, deleteDoc, collection, writeBatch } from 'firebase/firestore';
+import { onAuthStateChanged, signOut, getRedirectResult } from 'firebase/auth';
+import { db, auth } from './firebase';
+import { debouncedSetUserDoc, sanitizeForFirestore } from './utils/firebaseDebounce';
+
+import ConfirmEmail from './components/ConfirmEmail';
+import ApexCoreLogo from './components/ApexCoreLogo';
+
+const EMPTY_COMPANY_SETTINGS: CompanySettings = {
+  nomeFantasia: 'Vista Aérea Drone LTDA',
+  razaoSocial: 'Vista Aérea Drone LTDA',
+  cnpj: '32.216.083/0001-47',
+  inscricaoMunicipal: '99942',
+  inscricaoEstadual: 'ISENTO',
+  endereco: 'Rua Sereia de Itapuã',
+  numero: '81',
+  complemento: '',
+  bairro: 'Itapuã',
+  municipio: 'Vila Velha',
+  uf: 'ES',
+  cep: '29101-530',
+  email: 'contato@vistaaereadrone.com.br',
+  telefone: '',
+  logo: '',
+  fiscalSettings: {
+    inscricaoMunicipal: '99942',
+    regimeTributario: 'simples_nacional',
+    uf: 'ES',
+    ambiente: 'producao',
+    cbsRate: 0.9,
+    ibsRate: 0.1,
+    modoSimulacao: true,
+  }
+};
 
 export default function App() {
   // Navigation State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'orcamentos' | 'clientes' | 'produtos' | 'empresa'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'orcamentos' | 'clientes' | 'produtos' | 'empresa' | 'fiscal'>('dashboard');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // Check if we are on the confirm route
+  if (window.location.pathname === '/confirmar') {
+    return <ConfirmEmail />;
+  }
 
   // Dashboard shortcut navigation states
   const [initialIsGeneratingBudget, setInitialIsGeneratingBudget] = useState(false);
@@ -32,310 +74,649 @@ export default function App() {
   const [dashboardPreviewOrcamento, setDashboardPreviewOrcamento] = useState<Orcamento | null>(null);
 
   // Authentication state
-  const [currentUser, setCurrentUser] = useState<{ email: string; isGuest?: boolean } | null>(() => {
-    const saved = localStorage.getItem('vista_aerea_active_session');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (_) {
-        return null;
-      }
-    }
-    return null;
-  });
+  const [currentUser, setCurrentUser] = useState<{ uid: string; email: string; isGuest?: boolean } | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   // Core App States
   const [dbLoading, setDbLoading] = useState(true);
+  const [dbError, setDbError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [hasSynced, setHasSynced] = useState(false);
-  const [empresa, setEmpresa] = useState<CompanySettings>(INITIAL_COMPANY_SETTINGS);
+  const [empresa, setEmpresa] = useState<CompanySettings>(EMPTY_COMPANY_SETTINGS);
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [produtos, setProdutos] = useState<Produto[]>([]);
   const [orcamentos, setOrcamentos] = useState<Orcamento[]>([]);
+  const [recibos, setRecibos] = useState<Recibo[]>([]);
+  const [invoices, setInvoices] = useState<any[]>([]);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
 
-  // Sincronização inicial - APENAS LOCALSTORAGE (Sincronização automática DESABILITADA)
   useEffect(() => {
-    async function loadAllData() {
-      try {
-        setDbLoading(true);
-
-        // 1. CARREGAR EMPRESA
-        let currentEmpresa = INITIAL_COMPANY_SETTINGS;
-        const savedEmpresa = localStorage.getItem('orcaplus_company_settings');
-        if (savedEmpresa) {
+    // Process redirect result if user completed Google sign-in redirect
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (result?.user) {
+          const user = result.user;
+          console.log('Login com Google via redirect realizado com sucesso:', user.email);
           try {
-            currentEmpresa = JSON.parse(savedEmpresa);
-          } catch (_) {}
+            await setDoc(
+              doc(db, 'users', user.uid),
+              {
+                name: user.displayName || 'Usuário Google',
+                email: user.email?.toLowerCase().trim() || '',
+                emailVerified: true,
+                createdAt: new Date().toISOString(),
+              },
+              { merge: true }
+            );
+            localStorage.setItem('email_verified_' + user.uid, 'true');
+          } catch (e) {
+            console.warn('Erro ao salvar usuário do redirect:', e);
+          }
+          setCurrentUser({ uid: user.uid, email: user.email || '' });
         }
+      })
+      .catch((err) => {
+        console.warn('Erro em getRedirectResult:', err);
+      });
 
-        // Se por acaso a logo estiver vazia, gera no canvas
-        if (!currentEmpresa.logo) {
-          const canvas = document.createElement('canvas');
-          canvas.width = 200;
-          canvas.height = 200;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.fillStyle = '#1e293b'; // Slate 800
-            ctx.beginPath();
-            ctx.arc(100, 100, 100, 0, 2 * Math.PI);
-            ctx.fill();
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        // Google provider or emailVerified user is automatically verified
+        const isGoogleUser = user.providerData.some(p => p.providerId === 'google.com');
+        let isVerified = user.emailVerified || isGoogleUser;
 
-            ctx.strokeStyle = '#0ea5e9'; // Sky Blue
-            ctx.lineWidth = 6;
-            ctx.beginPath();
-            ctx.arc(100, 100, 85, 0, 2 * Math.PI);
-            ctx.stroke();
+        if (!isVerified) {
+          try {
+            const userDocSnap = await getDoc(doc(db, 'users', user.uid));
+            if (userDocSnap.exists() && userDocSnap.data().emailVerified === true) {
+              isVerified = true;
+            }
+          } catch (error: any) {
+            console.warn("Erro ao verificar status do e-mail no Firestore, tentando cache local:", error);
+          }
 
-            ctx.fillStyle = '#0ea5e9';
-            ctx.beginPath();
-            ctx.arc(100, 100, 18, 0, 2 * Math.PI);
-            ctx.fill();
-
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 8;
-            ctx.lineCap = 'round';
-            ctx.beginPath();
-            ctx.moveTo(50, 50);
-            ctx.lineTo(150, 150);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(150, 50);
-            ctx.lineTo(50, 150);
-            ctx.stroke();
-
-            ctx.fillStyle = '#0ea5e9';
-            const points = [{ x: 50, y: 50 }, { x: 150, y: 50 }, { x: 50, y: 150 }, { x: 150, y: 150 }];
-            points.forEach(pt => {
-              ctx.beginPath();
-              ctx.arc(pt.x, pt.y, 10, 0, 2 * Math.PI);
-              ctx.fill();
-            });
-
-            const dataUrl = canvas.toDataURL('image/png');
-            currentEmpresa = { ...currentEmpresa, logo: dataUrl };
-            localStorage.setItem('orcaplus_company_settings', JSON.stringify(currentEmpresa));
+          if (!isVerified && localStorage.getItem('email_verified_' + user.uid) === 'true') {
+            isVerified = true;
           }
         }
-        setEmpresa(currentEmpresa);
 
-        // 2. CARREGAR CLIENTES
-        let loadedClientes: Cliente[] = [];
-        const savedClientes = localStorage.getItem('orcaplus_clients');
-        if (savedClientes) {
-          try {
-            loadedClientes = JSON.parse(savedClientes);
-          } catch (_) {}
+        if (isVerified) {
+          localStorage.setItem('email_verified_' + user.uid, 'true');
+          setCurrentUser({ uid: user.uid, email: user.email || '' });
         } else {
-          loadedClientes = INITIAL_CLIENTS;
-          localStorage.setItem('orcaplus_clients', JSON.stringify(loadedClientes));
+          setCurrentUser(null);
         }
-        setClientes(loadedClientes);
+      } else {
+        setCurrentUser(null);
+      }
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
-        // 3. CARREGAR PRODUTOS
-        let loadedProdutos: Produto[] = [];
-        const savedProdutos = localStorage.getItem('orcaplus_products');
-        if (savedProdutos) {
-          try {
-            loadedProdutos = JSON.parse(savedProdutos);
-          } catch (_) {}
-        } else {
-          loadedProdutos = INITIAL_PRODUCTS;
-          localStorage.setItem('orcaplus_products', JSON.stringify(loadedProdutos));
+  // Rastreamento de ociosidade (ausência de uso) para sincronização sem bloquear o uso ativo
+  const lastActivityRef = React.useRef<number>(Date.now());
+  const [isIdle, setIsIdle] = React.useState(true);
+  const pendingSyncRef = React.useRef<boolean>(false);
+
+  React.useEffect(() => {
+    const handleActivity = () => {
+      lastActivityRef.current = Date.now();
+    };
+
+    const opts = { passive: true };
+    window.addEventListener('mousemove', handleActivity, opts);
+    window.addEventListener('keydown', handleActivity, opts);
+    window.addEventListener('mousedown', handleActivity, opts);
+    window.addEventListener('touchstart', handleActivity, opts);
+    window.addEventListener('input', handleActivity, opts);
+    window.addEventListener('scroll', handleActivity, opts);
+
+    const interval = setInterval(() => {
+      const idleTime = Date.now() - lastActivityRef.current;
+      setIsIdle(idleTime >= 3000);
+    }, 1000);
+
+    return () => {
+      window.removeEventListener('mousemove', handleActivity);
+      window.removeEventListener('keydown', handleActivity);
+      window.removeEventListener('mousedown', handleActivity);
+      window.removeEventListener('touchstart', handleActivity);
+      window.removeEventListener('input', handleActivity);
+      window.removeEventListener('scroll', handleActivity);
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Sincronização automática com o banco de dados realizada em lote
+  React.useEffect(() => {
+    async function performIdleSync() {
+      if (!isIdle || !pendingSyncRef.current || !currentUser?.uid || isSyncing) return;
+      const uid = currentUser.uid;
+      try {
+        setIsSyncing(true);
+
+        // Salvar em cache local primeiro
+        localStorage.setItem(`orcaplus_${uid}_empresa`, JSON.stringify(empresa));
+        localStorage.setItem(`orcaplus_${uid}_clientes`, JSON.stringify(clientes));
+        localStorage.setItem(`orcaplus_${uid}_produtos`, JSON.stringify(produtos));
+        localStorage.setItem(`orcaplus_${uid}_orcamentos`, JSON.stringify(orcamentos));
+        localStorage.setItem(`orcaplus_${uid}_invoices`, JSON.stringify(invoices));
+        localStorage.setItem(`orcaplus_${uid}_recibos`, JSON.stringify(recibos));
+
+        // Enviar para Firestore em lotes seguros (< 200 itens por lote)
+        const allOperations: { docRef: any; data: any }[] = [
+          { docRef: doc(db, 'users', uid, 'settings', 'company'), data: empresa },
+          ...clientes.map(c => ({ docRef: doc(db, 'users', uid, 'clientes', c.id), data: c })),
+          ...produtos.map(p => ({ docRef: doc(db, 'users', uid, 'produtos', p.id), data: p })),
+          ...orcamentos.map(o => ({ docRef: doc(db, 'users', uid, 'orcamentos', o.id), data: o })),
+          ...invoices.map(i => ({ docRef: doc(db, 'users', uid, 'invoices', i.id), data: i })),
+          ...recibos.map(r => ({ docRef: doc(db, 'users', uid, 'recibos', r.id), data: r })),
+        ];
+
+        const CHUNK_SIZE = 200;
+        for (let i = 0; i < allOperations.length; i += CHUNK_SIZE) {
+          const chunk = allOperations.slice(i, i + CHUNK_SIZE);
+          const batch = writeBatch(db);
+          chunk.forEach(op => {
+            batch.set(op.docRef, sanitizeForFirestore(op.data));
+          });
+          await batch.commit();
         }
-        setProdutos(loadedProdutos);
 
-        // 4. CARREGAR ORÇAMENTOS
-        let loadedOrcamentos: Orcamento[] = [];
-        const savedBudgets = localStorage.getItem('orcaplus_budgets');
-        if (savedBudgets) {
-          try {
-            loadedOrcamentos = JSON.parse(savedBudgets);
-          } catch (_) {}
-        } else {
-          loadedOrcamentos = INITIAL_BUDGETS;
-          localStorage.setItem('orcaplus_budgets', JSON.stringify(loadedOrcamentos));
-        }
-        setOrcamentos(loadedOrcamentos);
-
-        localStorage.setItem('orcaplus_initialized', 'true');
+        pendingSyncRef.current = false;
+        console.log("Sincronização com o banco de dados e armazenamento local realizada com sucesso.");
       } catch (err) {
-        console.error("Erro ao carregar dados locais:", err);
+        console.error("Erro na sincronização automática:", err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
+
+    if (isIdle && pendingSyncRef.current) {
+      performIdleSync();
+    }
+  }, [isIdle, currentUser, empresa, clientes, produtos, orcamentos, invoices, recibos]);
+
+  // Carregamento inicial de dados (combinando cache local e Firestore)
+  useEffect(() => {
+    async function loadAllData() {
+      if (!currentUser || !currentUser.uid) {
+        setClientes([]);
+        setProdutos([]);
+        setOrcamentos([]);
+        setInvoices([]);
+        setRecibos([]);
+        setEmpresa(EMPTY_COMPANY_SETTINGS);
+        setDbLoading(false);
+        return;
+      }
+
+      const uid = currentUser.uid;
+      setDbLoading(true);
+      setDbError(null);
+
+      // 1. Carregar do cache local imediatamente para exibição instantânea
+      try {
+        const localCompanyStr = localStorage.getItem(`orcaplus_${uid}_empresa`);
+        const localCliStr = localStorage.getItem(`orcaplus_${uid}_clientes`);
+        const localProdStr = localStorage.getItem(`orcaplus_${uid}_produtos`);
+        const localOrcStr = localStorage.getItem(`orcaplus_${uid}_orcamentos`);
+        const localInvStr = localStorage.getItem(`orcaplus_${uid}_invoices`);
+        const localRecStr = localStorage.getItem(`orcaplus_${uid}_recibos`);
+
+        if (localCompanyStr) setEmpresa(JSON.parse(localCompanyStr));
+        if (localCliStr) setClientes(JSON.parse(localCliStr));
+        if (localProdStr) setProdutos(JSON.parse(localProdStr));
+        if (localOrcStr) setOrcamentos(JSON.parse(localOrcStr));
+        if (localInvStr) setInvoices(JSON.parse(localInvStr));
+        if (localRecStr) setRecibos(JSON.parse(localRecStr));
+      } catch (cacheErr) {
+        console.warn("Erro ao ler cache local:", cacheErr);
+      }
+
+      const fetchWithTimeout = <T,>(promise: Promise<T>, timeoutMs = 8000): Promise<T | null> => {
+        let timer: ReturnType<typeof setTimeout>;
+        const timeoutPromise = new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), timeoutMs);
+        });
+        return Promise.race([promise, timeoutPromise])
+          .then(res => {
+            clearTimeout(timer);
+            return res as T;
+          })
+          .catch(err => {
+            clearTimeout(timer);
+            console.warn("Erro na requisição Firestore:", err);
+            return null;
+          });
+      };
+
+      try {
+        console.log(`Buscando dados atualizados do Firestore (${uid})...`);
+
+        const [companySnap, cliSnap, prodSnap, orcSnap, invSnap, recSnap] = await Promise.all([
+          fetchWithTimeout(getDoc(doc(db, 'users', uid, 'settings', 'company'))),
+          fetchWithTimeout(getDocs(collection(db, 'users', uid, 'clientes'))),
+          fetchWithTimeout(getDocs(collection(db, 'users', uid, 'produtos'))),
+          fetchWithTimeout(getDocs(collection(db, 'users', uid, 'orcamentos'))),
+          fetchWithTimeout(getDocs(collection(db, 'users', uid, 'invoices'))),
+          fetchWithTimeout(getDocs(collection(db, 'users', uid, 'recibos'))),
+        ]);
+
+        let hasNetworkError = false;
+
+        const mergeLists = <T extends { id: string }>(fsItems: T[], localKey: string): T[] => {
+          let localItems: T[] = [];
+          try {
+            const raw = localStorage.getItem(localKey);
+            if (raw) localItems = JSON.parse(raw);
+          } catch (e) {}
+
+          const map = new Map<string, T>();
+          localItems.forEach(item => { if (item && item.id) map.set(item.id, item); });
+          fsItems.forEach(item => { if (item && item.id) map.set(item.id, item); });
+
+          const merged = Array.from(map.values());
+          localStorage.setItem(localKey, JSON.stringify(merged));
+          return merged;
+        };
+
+        if (companySnap) {
+          if (companySnap.exists()) {
+            const companyData = companySnap.data() as CompanySettings;
+            setEmpresa(companyData);
+            localStorage.setItem(`orcaplus_${uid}_empresa`, JSON.stringify(companyData));
+          }
+        } else {
+          hasNetworkError = true;
+        }
+
+        if (cliSnap) {
+          const fsCli = cliSnap.docs.map(d => d.data() as Cliente);
+          const mergedCli = mergeLists(fsCli, `orcaplus_${uid}_clientes`);
+          setClientes(mergedCli);
+        } else {
+          hasNetworkError = true;
+        }
+
+        if (prodSnap) {
+          const fsProd = prodSnap.docs.map(d => d.data() as Produto);
+          const mergedProd = mergeLists(fsProd, `orcaplus_${uid}_produtos`);
+          setProdutos(mergedProd);
+        } else {
+          hasNetworkError = true;
+        }
+
+        if (orcSnap) {
+          const fsOrc = orcSnap.docs.map(d => d.data() as Orcamento);
+          const mergedOrc = mergeLists(fsOrc, `orcaplus_${uid}_orcamentos`);
+          setOrcamentos(mergedOrc);
+        } else {
+          hasNetworkError = true;
+        }
+
+        if (invSnap) {
+          const fsInv = invSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+          const mergedInv = mergeLists(fsInv, `orcaplus_${uid}_invoices`);
+          setInvoices(mergedInv);
+        } else {
+          hasNetworkError = true;
+        }
+
+        if (recSnap) {
+          const fsRec = recSnap.docs.map(d => d.data() as Recibo);
+          const mergedRec = mergeLists(fsRec, `orcaplus_${uid}_recibos`);
+          setRecibos(mergedRec);
+        } else {
+          hasNetworkError = true;
+        }
+
+        setIsOfflineMode(hasNetworkError);
+        console.log(`Carregamento concluído com sucesso para ${currentUser.email}`);
+      } catch (err) {
+        console.error("Erro ao carregar dados do banco:", err);
+        setIsOfflineMode(true);
       } finally {
         setDbLoading(false);
       }
     }
 
-    loadAllData();
-  }, []);
+    if (currentUser) {
+      loadAllData();
+    } else {
+      setDbLoading(false);
+    }
+  }, [currentUser]);
 
-  // MANUAL SYNCHRONIZATION FUNCTION
+  // FUNÇÃO DE SINCRONIZAÇÃO MANUAL
   const handleManualSync = async () => {
-    if (isSyncing) return;
+    if (isSyncing || !currentUser?.uid) return;
+    const uid = currentUser.uid;
     try {
       setIsSyncing(true);
       setIsOfflineMode(false);
 
-      // Sincroniza Empresa (Envia dados locais para o Firestore)
-      await setDoc(doc(db, 'settings', 'company'), empresa);
+      // Salvar localmente
+      localStorage.setItem(`orcaplus_${uid}_empresa`, JSON.stringify(empresa));
+      localStorage.setItem(`orcaplus_${uid}_clientes`, JSON.stringify(clientes));
+      localStorage.setItem(`orcaplus_${uid}_produtos`, JSON.stringify(produtos));
+      localStorage.setItem(`orcaplus_${uid}_orcamentos`, JSON.stringify(orcamentos));
+      localStorage.setItem(`orcaplus_${uid}_invoices`, JSON.stringify(invoices));
+      localStorage.setItem(`orcaplus_${uid}_recibos`, JSON.stringify(recibos));
 
-      // Sincroniza Clientes (Envia todos os locais para o Firestore)
-      for (const cli of clientes) {
-        await setDoc(doc(db, 'clientes', cli.id), cli);
+      const allOperations: { docRef: any; data: any }[] = [
+        { docRef: doc(db, 'users', uid, 'settings', 'company'), data: empresa },
+        ...clientes.map(c => ({ docRef: doc(db, 'users', uid, 'clientes', c.id), data: c })),
+        ...produtos.map(p => ({ docRef: doc(db, 'users', uid, 'produtos', p.id), data: p })),
+        ...orcamentos.map(o => ({ docRef: doc(db, 'users', uid, 'orcamentos', o.id), data: o })),
+        ...invoices.map(i => ({ docRef: doc(db, 'users', uid, 'invoices', i.id), data: i })),
+        ...recibos.map(r => ({ docRef: doc(db, 'users', uid, 'recibos', r.id), data: r })),
+      ];
+
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < allOperations.length; i += CHUNK_SIZE) {
+        const chunk = allOperations.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        chunk.forEach(op => {
+          batch.set(op.docRef, sanitizeForFirestore(op.data));
+        });
+        await batch.commit();
       }
 
-      // Sincroniza Produtos (Envia todos os locais para o Firestore)
-      for (const prod of produtos) {
-        await setDoc(doc(db, 'produtos', prod.id), prod);
-      }
-
-      // Sincroniza Orçamentos (Envia todos os locais para o Firestore)
-      for (const orc of orcamentos) {
-        await setDoc(doc(db, 'orcamentos', orc.id), orc);
-      }
-
+      pendingSyncRef.current = false;
       setHasSynced(true);
-      alert("Todos os dados foram sincronizados com sucesso com o Firebase!");
+      alert("Seus dados foram sincronizados diretamente com o banco de dados com sucesso!");
     } catch (err) {
       console.error("Erro na sincronização manual:", err);
       setIsOfflineMode(true);
-      alert("Falha na sincronização manual. Verifique sua conexão de Internet.");
+      alert("Falha na sincronização manual. Os dados estão preservados localmente.");
     } finally {
       setIsSyncing(false);
     }
   };
 
-  // Salvar Empresa (APENAS LOCALSTORAGE)
+  // Salvar Empresa
   const handleSaveEmpresa = async (newSettings: CompanySettings) => {
-    try {
-      setEmpresa(newSettings);
-      localStorage.setItem('orcaplus_company_settings', JSON.stringify(newSettings));
-    } catch (e) {
-      console.error("Erro ao salvar configuração da empresa localmente:", e);
+    setEmpresa(newSettings);
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
+      localStorage.setItem(`orcaplus_${currentUser.uid}_empresa`, JSON.stringify(newSettings));
+      debouncedSetUserDoc(currentUser.uid, 'settings', 'company', newSettings);
     }
   };
 
-  // Clientes (APENAS LOCALSTORAGE)
-  const handleAddClient = async (cli: Cliente) => {
-    try {
-      const updated = [cli, ...clientes];
-      setClientes(updated);
-      localStorage.setItem('orcaplus_clients', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Erro ao adicionar cliente localmente:", e);
+  // Notas Fiscais (Faturas)
+  const handleAddInvoice = async (newInv: any) => {
+    setInvoices(prev => {
+      const updated = [newInv, ...prev];
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_invoices`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'invoices', newInv.id, newInv);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+  };
+
+  const handleUpdateInvoice = async (updatedInv: any) => {
+    setInvoices(prev => {
+      const updated = prev.map(i => i.id === updatedInv.id ? updatedInv : i);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_invoices`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'invoices', updatedInv.id, updatedInv);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+  };
+
+  const handleDeleteInvoice = async (id: string) => {
+    setInvoices(prev => {
+      const updated = prev.filter(i => i.id !== id);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_invoices`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
+      try {
+        await deleteDoc(doc(db, 'users', currentUser.uid, 'invoices', id));
+      } catch (e) {
+        console.error("Erro ao excluir nota fiscal do banco:", e);
+      }
     }
+  };
+
+  const handleClearAllInvoices = async () => {
+    const idsToDelete = invoices.map(i => i.id);
+    setInvoices([]);
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
+      localStorage.setItem(`orcaplus_${currentUser.uid}_invoices`, JSON.stringify([]));
+      for (const id of idsToDelete) {
+        try {
+          await deleteDoc(doc(db, 'users', currentUser.uid, 'invoices', id));
+        } catch (e) {
+          console.error("Erro ao limpar nota fiscal do banco:", e);
+        }
+      }
+    }
+  };
+
+  // Clientes
+  const handleAddClient = async (cli: Cliente) => {
+    setClientes(prev => {
+      const updated = [cli, ...prev];
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_clientes`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'clientes', cli.id, cli);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
   };
 
   const handleUpdateClient = async (updatedCli: Cliente) => {
-    try {
-      const updated = clientes.map(c => c.id === updatedCli.id ? updatedCli : c);
-      setClientes(updated);
-      localStorage.setItem('orcaplus_clients', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Erro ao atualizar cliente localmente:", e);
-    }
+    setClientes(prev => {
+      const updated = prev.map(c => c.id === updatedCli.id ? updatedCli : c);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_clientes`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'clientes', updatedCli.id, updatedCli);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
   };
 
   const handleDeleteClient = async (id: string) => {
-    try {
-      const updated = clientes.filter(c => c.id !== id);
-      setClientes(updated);
-      localStorage.setItem('orcaplus_clients', JSON.stringify(updated));
-      // Remove do Firestore se existir para manter limpo, mas a sincronização geral é manual
+    setClientes(prev => {
+      const updated = prev.filter(c => c.id !== id);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_clientes`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
       try {
-        await deleteDoc(doc(db, 'clientes', id));
-      } catch (_) {}
-    } catch (e) {
-      console.error("Erro ao remover cliente localmente:", e);
+        await deleteDoc(doc(db, 'users', currentUser.uid, 'clientes', id));
+      } catch (e) {
+        console.error("Erro ao excluir cliente do banco:", e);
+      }
     }
   };
 
-  // Produtos (APENAS LOCALSTORAGE)
+  // Produtos
   const handleAddProduct = async (prod: Produto) => {
-    try {
-      const updated = [prod, ...produtos];
-      setProdutos(updated);
-      localStorage.setItem('orcaplus_products', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Erro ao adicionar produto localmente:", e);
-    }
+    setProdutos(prev => {
+      const updated = [prod, ...prev];
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_produtos`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'produtos', prod.id, prod);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
   };
 
   const handleUpdateProduct = async (updatedProd: Produto) => {
-    try {
-      const updated = produtos.map(p => p.id === updatedProd.id ? updatedProd : p);
-      setProdutos(updated);
-      localStorage.setItem('orcaplus_products', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Erro ao atualizar produto localmente:", e);
-    }
+    setProdutos(prev => {
+      const updated = prev.map(p => p.id === updatedProd.id ? updatedProd : p);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_produtos`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'produtos', updatedProd.id, updatedProd);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
   };
 
   const handleDeleteProduct = async (id: string) => {
-    try {
-      const updated = produtos.filter(p => p.id !== id);
-      setProdutos(updated);
-      localStorage.setItem('orcaplus_products', JSON.stringify(updated));
+    setProdutos(prev => {
+      const updated = prev.filter(p => p.id !== id);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_produtos`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
       try {
-        await deleteDoc(doc(db, 'produtos', id));
-      } catch (_) {}
-    } catch (e) {
-      console.error("Erro ao remover produto localmente:", e);
+        await deleteDoc(doc(db, 'users', currentUser.uid, 'produtos', id));
+      } catch (e) {
+        console.error("Erro ao excluir produto do banco:", e);
+      }
     }
   };
 
-  // Orçamentos (APENAS LOCALSTORAGE)
+  // Orçamentos
   const handleAddOrcamento = async (orc: Orcamento) => {
-    try {
-      const updated = [orc, ...orcamentos];
-      setOrcamentos(updated);
-      localStorage.setItem('orcaplus_budgets', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Erro ao gerar orçamento localmente:", e);
-    }
+    setOrcamentos(prev => {
+      const updated = [orc, ...prev];
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_orcamentos`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'orcamentos', orc.id, orc);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
   };
 
   const handleUpdateOrcamento = async (updatedOrc: Orcamento) => {
-    try {
-      const updated = orcamentos.map(o => o.id === updatedOrc.id ? updatedOrc : o);
-      setOrcamentos(updated);
-      localStorage.setItem('orcaplus_budgets', JSON.stringify(updated));
-    } catch (e) {
-      console.error("Erro ao atualizar orçamento localmente:", e);
-    }
+    setOrcamentos(prev => {
+      const updated = prev.map(o => o.id === updatedOrc.id ? updatedOrc : o);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_orcamentos`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'orcamentos', updatedOrc.id, updatedOrc);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
   };
 
   const handleDeleteOrcamento = async (id: string) => {
-    try {
-      const updated = orcamentos.filter(o => o.id !== id);
-      setOrcamentos(updated);
-      localStorage.setItem('orcaplus_budgets', JSON.stringify(updated));
+    setOrcamentos(prev => {
+      const updated = prev.filter(o => o.id !== id);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_orcamentos`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
       try {
-        await deleteDoc(doc(db, 'orcamentos', id));
-      } catch (_) {}
-    } catch (e) {
-      console.error("Erro ao excluir orçamento localmente:", e);
+        await deleteDoc(doc(db, 'users', currentUser.uid, 'orcamentos', id));
+      } catch (e) {
+        console.error("Erro ao excluir orçamento do banco:", e);
+      }
     }
   };
 
-  if (dbLoading) {
+  const handleAddRecibo = async (rec: Recibo) => {
+    setRecibos(prev => {
+      const updated = [rec, ...prev];
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_recibos`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'recibos', rec.id, rec);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+  };
+
+  const handleUpdateRecibo = async (updatedRec: Recibo) => {
+    setRecibos(prev => {
+      const updated = prev.map(r => r.id === updatedRec.id ? updatedRec : r);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_recibos`, JSON.stringify(updated));
+        debouncedSetUserDoc(currentUser.uid, 'recibos', updatedRec.id, updatedRec);
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+  };
+
+  const handleDeleteRecibo = async (id: string) => {
+    setRecibos(prev => {
+      const updated = prev.filter(r => r.id !== id);
+      if (currentUser?.uid) {
+        localStorage.setItem(`orcaplus_${currentUser.uid}_recibos`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+    pendingSyncRef.current = true;
+    if (currentUser?.uid) {
+      try {
+        await deleteDoc(doc(db, 'users', currentUser.uid, 'recibos', id));
+      } catch (e) {
+        console.error("Erro ao excluir recibo do banco:", e);
+      }
+    }
+  };
+
+  if (dbError) {
     return (
       <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 space-y-6">
-        <div className="relative">
-          <div className="p-4 bg-sky-500/10 rounded-2xl border border-sky-500/20 text-sky-400">
-            <Cpu size={40} className="animate-pulse" />
-          </div>
-          <span className="absolute -top-1 -right-1 flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-sky-500"></span>
-          </span>
+        <div className="p-4 bg-red-500/10 rounded-2xl border border-red-500/20 text-red-400">
+          <Cpu size={40} />
         </div>
         <div className="space-y-2 text-center max-w-xs">
-          <h2 className="text-base font-bold tracking-wider uppercase text-slate-100">Vista Aérea Drones</h2>
-          <p className="text-xs text-sky-400 font-mono">Sincronizando com Banco Cloud Firebase...</p>
+          <h2 className="text-base font-bold tracking-wider uppercase text-slate-100">Erro de Sincronização</h2>
+          <p className="text-xs text-red-400 font-mono">
+            {dbError}
+          </p>
         </div>
-        <div className="flex items-center space-x-2 text-slate-500 text-xs">
-          <RefreshCw size={14} className="animate-spin" />
+        <div className="flex space-x-3">
+          <button
+            onClick={() => { setDbError(null); setIsOfflineMode(true); }}
+            className="mt-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-sm font-bold transition border border-slate-700"
+          >
+            Usar Modo Local / Offline
+          </button>
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-2 px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white rounded-lg text-sm font-bold transition"
+          >
+            Tentar Novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (dbLoading || authLoading) {
+    return (
+      <div className="min-h-screen bg-[#080c14] text-white flex flex-col items-center justify-center p-6 space-y-6">
+        <ApexCoreLogo size="lg" />
+        <div className="space-y-2 text-center max-w-xs">
+          <p className="text-xs text-sky-400 font-mono tracking-wider font-semibold">
+            {authLoading ? 'Verificando sessão com o Google e Firebase...' : 'Sincronizando com Banco Cloud Firebase...'}
+          </p>
+        </div>
+        <div className="flex items-center space-x-2 text-slate-400 text-xs font-mono">
+          <RefreshCw size={14} className="animate-spin text-sky-400" />
           <span>Aguarde um instante</span>
         </div>
       </div>
@@ -348,234 +729,95 @@ export default function App() {
       <AuthScreen 
         onSuccess={(user) => {
           setCurrentUser(user);
-          localStorage.setItem('vista_aerea_active_session', JSON.stringify(user));
         }} 
       />
     );
   }
 
+  const handleQuickAction = (action: 'emitir_orcamento' | 'add_cliente' | 'add_produto' | 'fiscal') => {
+    setInitialIsGeneratingBudget(false);
+    setInitialIsAddingClient(false);
+    setInitialIsAddingProduct(false);
+
+    if (action === 'emitir_orcamento') {
+      setInitialIsGeneratingBudget(true);
+      setActiveTab('orcamentos');
+    } else if (action === 'add_cliente') {
+      setInitialIsAddingClient(true);
+      setActiveTab('clientes');
+    } else if (action === 'add_produto') {
+      setInitialIsAddingProduct(true);
+      setActiveTab('produtos');
+    } else if (action === 'fiscal') {
+      setActiveTab('fiscal');
+    }
+  };
+
   return (
-    <div className="min-h-screen md:h-screen md:overflow-hidden bg-slate-50 flex flex-col md:flex-row font-sans pb-20 md:pb-0 select-text">
-      {/* Persistent Sidebar - Desktop only */}
-      <aside className="hidden md:flex flex-col w-64 bg-slate-900 text-white shrink-0 h-screen sticky top-0 border-r border-slate-800 z-30 shadow-lg justify-between p-5">
-        <div className="flex flex-col space-y-6">
-          {/* Logo & Brand */}
-          <div className="flex items-center space-x-3 pb-4 border-b border-slate-800/80">
-            {empresa.logo ? (
-              <div className="w-10 h-10 rounded-lg overflow-hidden bg-white flex items-center justify-center p-0.5 flex-shrink-0 shadow-sm">
-                <img src={empresa.logo} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
-              </div>
-            ) : (
-              <div className="p-2 bg-sky-500 rounded-lg text-white">
-                <Cpu size={18} className="animate-pulse" />
-              </div>
-            )}
-            <div className="min-w-0">
-              <h1 className="text-xs font-extrabold tracking-tight text-slate-100 truncate leading-tight">
-                {empresa.nomeFantasia || 'Vista Aérea Drones'}
-              </h1>
-              <p className="text-[8px] text-sky-400 font-mono tracking-wider font-semibold uppercase truncate">
-                PROPOSTAS COMERCIAIS
-              </p>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[#0f1b2d] text-slate-100 flex flex-col font-sans select-text relative overflow-x-hidden pb-24 lg:pb-8">
+      {/* Ambient background lighting orbs */}
+      <div className="bg-glow-orb-1" />
+      <div className="bg-glow-orb-2" />
 
-          {/* Navigation Links */}
-          <nav className="flex flex-col space-y-1.5 pt-2">
-            <button
-              onClick={() => {
-                setInitialIsGeneratingBudget(false);
-                setInitialIsAddingClient(false);
-                setInitialIsAddingProduct(false);
-                setActiveTab('dashboard');
-              }}
-              className={`flex items-center space-x-3 w-full py-2.5 px-3.5 rounded-xl text-xs font-semibold tracking-wide transition-all cursor-pointer ${
-                activeTab === 'dashboard'
-                  ? 'bg-sky-500/10 text-sky-400 border-l-2 border-sky-500 font-bold shadow-inner'
-                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
-              }`}
-            >
-              <LayoutDashboard size={16} />
-              <span>Visão Geral</span>
-            </button>
+      {/* Floating Header & Navigation Island */}
+      <FloatingNavigation
+        activeTab={activeTab}
+        setActiveTab={(tab) => {
+          setInitialIsGeneratingBudget(false);
+          setInitialIsAddingClient(false);
+          setInitialIsAddingProduct(false);
+          setActiveTab(tab);
+        }}
+        empresa={empresa}
+        currentUser={currentUser}
+        isOfflineMode={isOfflineMode}
+        isSyncing={isSyncing}
+        onManualSync={handleManualSync}
+        onSignOut={async () => {
+          await signOut(auth);
+          setCurrentUser(null);
+        }}
+        onQuickAction={handleQuickAction}
+        counts={{
+          orcamentos: orcamentos.length,
+          clientes: clientes.length,
+          produtos: produtos.length,
+          invoices: invoices.length
+        }}
+        isSidebarOpen={isSidebarOpen}
+        setIsSidebarOpen={setIsSidebarOpen}
+      />
 
-            <button
-              onClick={() => {
-                setInitialIsGeneratingBudget(false);
-                setInitialIsAddingClient(false);
-                setInitialIsAddingProduct(false);
-                setActiveTab('orcamentos');
-              }}
-              className={`flex items-center space-x-3 w-full py-2.5 px-3.5 rounded-xl text-xs font-semibold tracking-wide transition-all cursor-pointer ${
-                activeTab === 'orcamentos'
-                  ? 'bg-sky-500/10 text-sky-400 border-l-2 border-sky-500 font-bold shadow-inner'
-                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
-              }`}
-            >
-              <FileText size={16} />
-              <span>Orçamentos</span>
-            </button>
+      {/* Main Glass Content View Router with Adaptive Sidebar */}
+      <div className="flex-1 w-full max-w-[1600px] mx-auto px-3 sm:px-6 md:px-8 py-4 relative z-10 flex gap-6">
+        <SidebarDesktop
+          isSidebarOpen={isSidebarOpen}
+          setIsSidebarOpen={setIsSidebarOpen}
+          activeTab={activeTab}
+          setActiveTab={(tab) => {
+            setInitialIsGeneratingBudget(false);
+            setInitialIsAddingClient(false);
+            setInitialIsAddingProduct(false);
+            setActiveTab(tab);
+          }}
+          empresa={empresa}
+          counts={{
+            orcamentos: orcamentos.length,
+            clientes: clientes.length,
+            produtos: produtos.length,
+            invoices: invoices.length
+          }}
+        />
 
-            <button
-              onClick={() => {
-                setInitialIsGeneratingBudget(false);
-                setInitialIsAddingClient(false);
-                setInitialIsAddingProduct(false);
-                setActiveTab('clientes');
-              }}
-              className={`flex items-center space-x-3 w-full py-2.5 px-3.5 rounded-xl text-xs font-semibold tracking-wide transition-all cursor-pointer ${
-                activeTab === 'clientes'
-                  ? 'bg-sky-500/10 text-sky-400 border-l-2 border-sky-500 font-bold shadow-inner'
-                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
-              }`}
-            >
-              <Users size={16} />
-              <span>Clientes</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setInitialIsGeneratingBudget(false);
-                setInitialIsAddingClient(false);
-                setInitialIsAddingProduct(false);
-                setActiveTab('produtos');
-              }}
-              className={`flex items-center space-x-3 w-full py-2.5 px-3.5 rounded-xl text-xs font-semibold tracking-wide transition-all cursor-pointer ${
-                activeTab === 'produtos'
-                  ? 'bg-sky-500/10 text-sky-400 border-l-2 border-sky-500 font-bold shadow-inner'
-                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
-              }`}
-            >
-              <ShoppingBag size={16} />
-              <span>Serviços / Produtos</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setInitialIsGeneratingBudget(false);
-                setInitialIsAddingClient(false);
-                setInitialIsAddingProduct(false);
-                setActiveTab('empresa');
-              }}
-              className={`flex items-center space-x-3 w-full py-2.5 px-3.5 rounded-xl text-xs font-semibold tracking-wide transition-all cursor-pointer ${
-                activeTab === 'empresa'
-                  ? 'bg-sky-500/10 text-sky-400 border-l-2 border-sky-500 font-bold shadow-inner'
-                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
-              }`}
-            >
-              <Building size={16} />
-              <span>Minha Empresa</span>
-            </button>
-          </nav>
-        </div>
-
-        {/* Sidebar Footer */}
-        <div className="flex flex-col space-y-3 pt-4 border-t border-slate-800/80">
-          {/* Cloud Sync Status */}
-          {isOfflineMode ? (
-            <div className="flex items-center space-x-2 bg-amber-950/45 border border-amber-905 px-3 py-2 rounded-xl text-[10px] font-bold text-amber-400">
-              <span className="relative flex h-1.5 w-1.5 select-none">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-500"></span>
-              </span>
-              <span className="font-mono">MODO OFFLINE</span>
-            </div>
-          ) : (
-            <div className="flex items-center space-x-2 bg-sky-955/45 border border-sky-905 px-3 py-2 rounded-xl text-[10px] font-bold text-sky-400">
-              <span className="relative flex h-1.5 w-1.5 select-none">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-sky-500"></span>
-              </span>
-              <span className="font-mono">CLOUDSYNC ATIVO</span>
-            </div>
-          )}
-
-          {/* Operator and Logout */}
-          <div className="flex items-center justify-between bg-slate-850 p-2.5 rounded-xl border border-slate-800/80">
-            <div className="truncate mr-1.5">
-              <p className="text-[10px] font-semibold text-slate-300 truncate">{currentUser.email}</p>
-              <p className="text-[8px] text-slate-500 font-mono">Operador Ativo</p>
-            </div>
-            <button
-              onClick={() => {
-                setCurrentUser(null);
-                localStorage.removeItem('vista_aerea_active_session');
-              }}
-              className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-white border border-slate-700 hover:border-rose-900 transition flex-shrink-0 cursor-pointer"
-              title="Sair"
-            >
-              <LogOut size={13} />
-            </button>
-          </div>
-        </div>
-      </aside>
-
-      {/* Dynamic Header - Mobile only */}
-      <header className="md:hidden sticky top-0 z-40 bg-slate-900 text-white px-4 py-4 shadow-sm border-b border-slate-800 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          {empresa.logo ? (
-            <div className="w-12 h-12 rounded-xl overflow-hidden bg-white border border-slate-700 flex items-center justify-center p-1 flex-shrink-0 shadow-md">
-              <img src={empresa.logo} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
-            </div>
-          ) : (
-            <div className="p-2 bg-sky-500 rounded-xl text-white shadow-md">
-              <Cpu size={22} className="animate-pulse" />
-            </div>
-          )}
-          <div>
-            <h1 className="text-sm md:text-base font-extrabold tracking-tight text-slate-100 leading-tight">
-              {empresa.nomeFantasia || 'Vista Aérea Drones'}
-            </h1>
-            <p className="text-[9px] text-sky-400 font-mono tracking-wider font-semibold uppercase">
-              SISTEMA DE PROPOSTAS COMERCIAIS
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-2">
-          {isOfflineMode ? (
-            <div className="flex items-center space-x-1.5 bg-amber-950 border border-amber-850 px-2.5 py-1 rounded-full text-[9px] font-bold text-amber-400 flex-shrink-0">
-              <span className="relative flex h-1.5 w-1.5 select-none">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-500"></span>
-              </span>
-              <span>OFFLINE</span>
-            </div>
-          ) : (
-            <div className="flex items-center space-x-1.5 bg-sky-950 border border-sky-800 px-2.5 py-1 rounded-full text-[9px] font-bold text-sky-400 flex-shrink-0">
-              <span className="relative flex h-1.5 w-1.5 select-none">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-sky-500"></span>
-              </span>
-              <span>NUVEM</span>
-            </div>
-          )}
-
-          <button
-            onClick={() => {
-              setCurrentUser(null);
-              localStorage.removeItem('vista_aerea_active_session');
-            }}
-            className="p-1 px-2.5 rounded-xl bg-slate-800 hover:bg-rose-950 border border-slate-700 hover:border-rose-900 text-slate-300 hover:text-white transition flex items-center space-x-1 cursor-pointer"
-            title="Sair da Conta"
-          >
-            <LogOut size={12} />
-            <span className="text-[9px] font-bold uppercase tracking-wider">Sair</span>
-          </button>
-        </div>
-      </header>
-
-
-      {/* Main Container / Content Switcher Router */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 md:px-8 py-5 md:py-8 overflow-y-auto">
+        <main className="flex-1 min-w-0 transition-all duration-300">
         <AnimatePresence mode="wait">
           {activeTab === 'dashboard' && (
             <motion.div
               key="dashboard-pane"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.15 }}
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.99 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
               <Dashboard
                 orcamentos={orcamentos}
@@ -607,20 +849,126 @@ export default function App() {
           {activeTab === 'orcamentos' && (
             <motion.div
               key="orcamentos-pane"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.15 }}
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.99 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
               <BudgetGenerator
                 clientes={clientes}
                 produtos={produtos}
                 orcamentos={orcamentos}
+                recibos={recibos}
                 empresa={empresa}
                 onAddOrcamento={handleAddOrcamento}
                 onDeleteOrcamento={handleDeleteOrcamento}
                 onUpdateOrcamento={handleUpdateOrcamento}
+                onAddRecibo={handleAddRecibo}
+                onDeleteRecibo={handleDeleteRecibo}
+                onUpdateRecibo={handleUpdateRecibo}
+                onAddProduct={handleAddProduct}
                 initialIsGenerating={initialIsGeneratingBudget}
+                onConvertToInvoice={async (orc, type: 'NFE' | 'NFSE' | 'BOTH') => {
+                  try {
+                    const isService = (item: any) => {
+                      if (!item) return false;
+                      const t = (item.tipo || '').toString().toLowerCase();
+                      if (t === 'servico' || t === 'serviço') return true;
+                      if (t === 'produto') return false;
+                      if (item.subServicos && item.subServicos.length > 0) return true;
+                      const name = (item.nome || '').toLowerCase();
+                      const serviceKeywords = [
+                        'serviço', 'servico', 'mão de obra', 'mao de obra', 'mão-de-obra',
+                        'manutenção', 'manutencao', 'reparo', 'troca', 'calibração', 'calibracao',
+                        'instalação', 'instalacao', 'laudo', 'diagnóstico', 'diagnostico',
+                        'conserto', 'revisão', 'revisao', 'ajuste', 'limpeza', 'assistência',
+                        'assistencia', 'remapeamento'
+                      ];
+                      return serviceKeywords.some(kw => name.includes(kw));
+                    };
+
+                    const cepMatch = (orc.clienteEndereco || '').match(/\b\d{5}-?\d{3}\b/);
+                    const parsedCep = cepMatch ? cepMatch[0] : (empresa.cep || '29107-250');
+
+                    const parsedCompanyCityUf = parseCompanyCityAndUf(empresa);
+                    const buildDestinatario = () => ({
+                      nome: orc.clienteNome || 'Cliente Consumidor',
+                      cpfCnpj: orc.clienteDocumento || '000.000.000-00',
+                      endereco: orc.clienteEndereco || 'Endereço Não informado',
+                      email: orc.clienteEmail || '',
+                      telefone: orc.clienteTelefone || '',
+                      cep: parsedCep,
+                      bairro: 'Centro',
+                      municipio: empresa.municipio || parsedCompanyCityUf.municipio,
+                      uf: empresa.uf || parsedCompanyCityUf.uf
+                    });
+
+                    const newInvoicesToCreate: any[] = [];
+
+                    if (type === 'NFE' || type === 'BOTH') {
+                      const productItems = (orc.items || []).filter(item => !isService(item));
+                      const productVal = productItems.reduce((acc, item) => acc + (item.quantidade * (item.precoUnitario || 0)), 0);
+                      
+                      newInvoicesToCreate.push({
+                        id: Math.random().toString(36).substr(2, 9),
+                        type: 'NFE',
+                        number: type === 'BOTH' ? `${orc.numero}-NFE` : orc.numero,
+                        clientName: orc.clienteNome || 'Cliente Consumidor',
+                        totalValue: productItems.length > 0 ? productVal : orc.valorTotal,
+                        status: 'pending_signature',
+                        issueDate: new Date().toISOString(),
+                        budgetRefId: orc.id,
+                        items: productItems.length > 0 ? productItems : (orc.items || []),
+                        clienteDocumento: orc.clienteDocumento || '',
+                        clienteEndereco: orc.clienteEndereco || '',
+                        clienteEmail: orc.clienteEmail || '',
+                        clienteTelefone: orc.clienteTelefone || '',
+                        observacoes: orc.observacoes || '',
+                        destinatario: buildDestinatario()
+                      });
+                    }
+
+                    if (type === 'NFSE' || type === 'BOTH') {
+                      const serviceItems = (orc.items || []).filter(item => isService(item));
+                      const serviceVal = serviceItems.reduce((acc, item) => acc + (item.quantidade * (item.precoUnitario || 0)), 0);
+
+                      newInvoicesToCreate.push({
+                        id: Math.random().toString(36).substr(2, 9),
+                        type: 'NFSE',
+                        number: type === 'BOTH' ? `${orc.numero}-NFSE` : orc.numero,
+                        clientName: orc.clienteNome || 'Cliente Consumidor',
+                        totalValue: serviceItems.length > 0 ? serviceVal : orc.valorTotal,
+                        status: 'pending_signature',
+                        issueDate: new Date().toISOString(),
+                        budgetRefId: orc.id,
+                        items: serviceItems.length > 0 ? serviceItems : (orc.items || []),
+                        clienteDocumento: orc.clienteDocumento || '',
+                        clienteEndereco: orc.clienteEndereco || '',
+                        clienteEmail: orc.clienteEmail || '',
+                        clienteTelefone: orc.clienteTelefone || '',
+                        observacoes: orc.observacoes || '',
+                        destinatario: buildDestinatario()
+                      });
+                    }
+
+                    const updatedInvoices = [...newInvoicesToCreate, ...invoices];
+                    setInvoices(updatedInvoices);
+                    if (currentUser?.uid) {
+                      localStorage.setItem(`orcaplus_${currentUser.uid}_invoices`, JSON.stringify(updatedInvoices));
+                      for (const inv of newInvoicesToCreate) {
+                        try {
+                          debouncedSetUserDoc(currentUser.uid, 'invoices', inv.id, inv);
+                        } catch (fsErr) {
+                          console.error("Firebase invoice sync error:", fsErr);
+                        }
+                      }
+                    }
+
+                    setActiveTab('fiscal');
+                  } catch (err) {
+                    console.error('Erro ao converter orcamento:', err);
+                  }
+                }}
               />
             </motion.div>
           )}
@@ -628,10 +976,10 @@ export default function App() {
           {activeTab === 'clientes' && (
             <motion.div
               key="clientes-pane"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.15 }}
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.99 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
               <ClientRegistration
                 clientes={clientes}
@@ -646,10 +994,10 @@ export default function App() {
           {activeTab === 'produtos' && (
             <motion.div
               key="produtos-pane"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.15 }}
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.99 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
               <ProductRegistration
                 produtos={produtos}
@@ -664,10 +1012,10 @@ export default function App() {
           {activeTab === 'empresa' && (
             <motion.div
               key="empresa-pane"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.15 }}
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.99 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
               <CompanySettingsForm
                 settings={empresa}
@@ -675,94 +1023,36 @@ export default function App() {
                 onManualSync={handleManualSync}
                 isSyncing={isSyncing}
                 hasSynced={hasSynced}
+                currentUser={currentUser}
+              />
+            </motion.div>
+          )}
+
+          {activeTab === 'fiscal' && (
+            <motion.div
+              key="fiscal-pane"
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.99 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+            >
+              <FiscalModule
+                empresa={empresa}
+                clientes={clientes}
+                produtos={produtos}
+                orcamentos={orcamentos}
+                invoices={invoices}
+                onAddInvoice={handleAddInvoice}
+                onUpdateInvoice={handleUpdateInvoice}
+                onDeleteInvoice={handleDeleteInvoice}
+                onClearAllInvoices={handleClearAllInvoices}
+                onUpdateEmpresa={handleSaveEmpresa}
               />
             </motion.div>
           )}
         </AnimatePresence>
       </main>
-
-      {/* iOS styled Premium bottom Navigation Tab Bar */}
-      <nav id="navbar-iphone-dock" className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-slate-100 flex py-1.5 px-3.5 justify-around shadow-lg">
-        {/* Dashboard Tab */}
-        <button
-          onClick={() => {
-            setInitialIsGeneratingBudget(false);
-            setInitialIsAddingClient(false);
-            setInitialIsAddingProduct(false);
-            setActiveTab('dashboard');
-          }}
-          className={`flex flex-col items-center justify-center space-y-1 py-1 px-3.5 rounded-xl transition ${
-            activeTab === 'dashboard' ? 'text-sky-600 font-bold' : 'text-slate-400 hover:text-slate-600'
-          }`}
-        >
-          <LayoutDashboard size={20} />
-          <span className="text-[10px] leading-none">Início</span>
-        </button>
-
-        {/* Orçamentos Tab */}
-        <button
-          onClick={() => {
-            setInitialIsGeneratingBudget(false);
-            setInitialIsAddingClient(false);
-            setInitialIsAddingProduct(false);
-            setActiveTab('orcamentos');
-          }}
-          className={`flex flex-col items-center justify-center space-y-1 py-1 px-3.5 rounded-xl transition ${
-            activeTab === 'orcamentos' ? 'text-sky-600 font-bold' : 'text-slate-400 hover:text-slate-600'
-          }`}
-        >
-          <FileText size={20} />
-          <span className="text-[10px] leading-none">Orçamentos</span>
-        </button>
-
-        {/* Clientes Tab */}
-        <button
-          onClick={() => {
-            setInitialIsGeneratingBudget(false);
-            setInitialIsAddingClient(false);
-            setInitialIsAddingProduct(false);
-            setActiveTab('clientes');
-          }}
-          className={`flex flex-col items-center justify-center space-y-1 py-1 px-3.5 rounded-xl transition ${
-            activeTab === 'clientes' ? 'text-sky-600 font-bold' : 'text-slate-400 hover:text-slate-600'
-          }`}
-        >
-          <Users size={20} />
-          <span className="text-[10px] leading-none uppercase tracking-tight font-black">Cadastro Clientes</span>
-        </button>
-
-        {/* Catalog/Produtos Tab */}
-        <button
-          onClick={() => {
-            setInitialIsGeneratingBudget(false);
-            setInitialIsAddingClient(false);
-            setInitialIsAddingProduct(false);
-            setActiveTab('produtos');
-          }}
-          className={`flex flex-col items-center justify-center space-y-1 py-1 px-3.5 rounded-xl transition ${
-            activeTab === 'produtos' ? 'text-sky-600 font-bold' : 'text-slate-400 hover:text-slate-600'
-          }`}
-        >
-          <ShoppingBag size={20} />
-          <span className="text-[10px] leading-none uppercase tracking-tight font-black text-center">Cadastro Serviços/Produtos</span>
-        </button>
-
-        {/* Minha Empresa Tab */}
-        <button
-          onClick={() => {
-            setInitialIsGeneratingBudget(false);
-            setInitialIsAddingClient(false);
-            setInitialIsAddingProduct(false);
-            setActiveTab('empresa');
-          }}
-          className={`flex flex-col items-center justify-center space-y-1 py-1 px-3.5 rounded-xl transition ${
-            activeTab === 'empresa' ? 'text-sky-600 font-bold' : 'text-slate-400 hover:text-slate-600'
-          }`}
-        >
-          <Building size={20} />
-          <span className="text-[10px] leading-none">Empresa</span>
-        </button>
-      </nav>
+    </div>
 
       {/* Dashboard PDF Preview Modal */}
       <AnimatePresence>
